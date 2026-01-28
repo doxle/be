@@ -9,7 +9,9 @@ set -euo pipefail
 
 # Config
 FN=${FN:-doxle-annotations-api}
-ALIAS=${ALIAS:-}                  # optional alias; set via env ALIAS or 2nd arg
+# Default alias is "prod" so deployments update the prod alias automatically.
+# Override by setting ALIAS to a different name, or to an empty string to skip alias updates.
+ALIAS=${ALIAS:-prod}
 DESKTOP_ZIP=${DESKTOP_ZIP:-"$HOME/Desktop/bootstrap.zip"}
 
 # Paths

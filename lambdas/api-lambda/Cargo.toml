@@ -9,6 +9,8 @@ path = "src/main.rs"
 
 [dependencies]
 doxle-shared = { path = "../../shared" }
+annotations-block = { path = "../../blocks/annotations" }
+doxle-atoms = { path = "../../atoms" }
 
 aws-config = { workspace = true }
 aws-sdk-apigatewaymanagement = { workspace = true }
@@ -22,3 +24,10 @@ tracing = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+base64.workspace = true
+
+[package.metadata.lambda.env]
+TABLE_NAME = "doxle"
+COGNITO_CLIENT_ID = "59u7sgmc3u137f960q2k8j0lc8"
+COGNITO_CLIENT_SECRET = "1cp4p05hq1iv10oacjtu1e0k7betc0dgrnsr5torka52al7essra"
+COGNITO_USER_POOL_ID="ap-southeast-2_Rmd3TFvE9"

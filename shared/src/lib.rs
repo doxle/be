@@ -2,10 +2,8 @@ pub mod types;
 pub mod auth;
 pub mod users;
 pub mod projects;
-pub mod blocks;
-pub mod images;
-pub mod annotations;
-pub mod classes;
+// pub mod annotations; // Moved to atoms::tasks
+// pub mod images;      // Moved to atoms::media
 pub mod sockets;
 pub mod s3;
 pub mod s3_multipart;

@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "shared",
+    "atoms",
+    "blocks/annotations",
     "lambdas/api-lambda",
     "lambdas/stream-lambda",
 ]

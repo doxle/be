@@ -4,18 +4,17 @@ use serde::{Deserialize, Serialize};
 use crate::types::{ImageMetadata, ImageLevel};
 use crate::image_processing;
 
-const BUCKET_NAME: &str = "doxle-annotations";
-const MULTIPART_THRESHOLD: usize = 5 * 1024 * 1024; // 5MB
+// const BUCKET_NAME: &str = "doxle-annotations";
+const MULTIPART_THRESHOLD: usize = 50 * 1024 * 1024; // 50MB
 
 #[derive(Deserialize)]
 pub struct InitiateUploadRequest {
-    pub project_id: String,
     pub block_id: String,
     pub file_name: String,
     pub content_type: String,
     pub file_size: usize,
 }
-
+    
 #[derive(Serialize)]
 pub struct InitiateUploadResponse {
     pub image_id: String,
@@ -33,7 +32,6 @@ pub struct UploadPart {
 
 #[derive(Deserialize)]
 pub struct CompleteMultipartRequest {
-    pub project_id: String,
     pub block_id: String,
     pub image_id: String,
     pub upload_id: String,
@@ -53,6 +51,10 @@ pub struct UploadCompleteResponse {
     pub url: String,
 }
 
+fn get_bucket_name()->String{
+    std::env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "doxle-app".to_string())
+}
+
 /// Initiate upload - returns single or multipart presigned URLs
 pub async fn initiate_upload(
     s3_client: &S3Client,
@@ -66,9 +68,9 @@ pub async fn initiate_upload(
         .unwrap_or("jpg")
         .to_string();
     
+    // Updated S3 key structure: annotations/blocks/{block_id}/images/{image_id}.{ext}
     let s3_key = format!(
-        "projects/{}/blocks/{}/{}.{}",
-        request.project_id,
+        "annotations/blocks/{}/images/{}.{}",
         request.block_id,
         image_id,
         extension
@@ -83,7 +85,7 @@ pub async fn initiate_upload(
         // Initiate multipart upload
         let create_result = s3_client
             .create_multipart_upload()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&s3_key)
             .content_type(&request.content_type)
             .send()
@@ -100,7 +102,7 @@ pub async fn initiate_upload(
         for part_number in 1..=num_parts {
             let presigned = s3_client
                 .upload_part()
-                .bucket(BUCKET_NAME)
+                .bucket(&get_bucket_name())
                 .key(&s3_key)
                 .upload_id(&upload_id)
                 .part_number(part_number)
@@ -137,7 +139,7 @@ pub async fn initiate_upload(
         // Single part upload for files < 5MB
         let presigned = s3_client
             .put_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&s3_key)
             .content_type(&request.content_type)
             .presigned(
@@ -174,8 +176,7 @@ pub async fn complete_multipart_upload(
     request: CompleteMultipartRequest,
 ) -> Result<Response<Body>, Error> {
     let s3_key = format!(
-        "projects/{}/blocks/{}/{}.{}",
-        request.project_id,
+        "annotations/blocks/{}/images/{}.{}",
         request.block_id,
         request.image_id,
         request.extension
@@ -201,7 +202,7 @@ pub async fn complete_multipart_upload(
         // Complete the multipart upload
         s3_client
             .complete_multipart_upload()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&s3_key)
             .upload_id(&request.upload_id)
             .multipart_upload(completed_upload)
@@ -212,25 +213,24 @@ pub async fn complete_multipart_upload(
     
     // Process image asynchronously (generate pyramid if needed)
     tracing::info!("🔄 Starting post-upload processing for image: {}", request.image_id);
-    match process_uploaded_image(
-        s3_client,
-        &request.project_id,
-        &request.block_id,
-        &request.image_id,
-        &request.extension,
-    ).await {
-        Ok(metadata) => {
-            tracing::info!("✅ Image processing complete: {} levels", metadata.levels.len());
-        }
-        Err(e) => {
-            tracing::error!("⚠️ Image processing failed (continuing anyway): {}", e);
-        }
-    }
+    //@sk causing slowness match process_uploaded_image(
+    //     s3_client,
+    //     &request.block_id,
+    //     &request.image_id,
+    //     &request.extension,
+    // ).await {
+    //     Ok(metadata) => {
+    //         tracing::info!("✅ Image processing complete: {} levels", metadata.levels.len());
+    //     }
+    //     Err(e) => {
+    //         tracing::error!("⚠️ Image processing failed (continuing anyway): {}", e);
+    //     }
+    // }
     
     // Generate public URL (use first level path)
     let url = format!(
         "https://{}.s3.amazonaws.com/{}",
-        BUCKET_NAME,
+        &get_bucket_name(),
         s3_key
     );
     
@@ -250,15 +250,13 @@ pub async fn complete_multipart_upload(
 /// Abort multipart upload (cleanup on failure)
 pub async fn abort_multipart_upload(
     s3_client: &S3Client,
-    project_id: String,
     block_id: String,
     image_id: String,
     upload_id: String,
     extension: String,
 ) -> Result<Response<Body>, Error> {
     let s3_key = format!(
-        "projects/{}/blocks/{}/{}.{}",
-        project_id,
+        "annotations/blocks/{}/images/{}.{}",
         block_id,
         image_id,
         extension
@@ -266,7 +264,7 @@ pub async fn abort_multipart_upload(
     
     s3_client
         .abort_multipart_upload()
-        .bucket(BUCKET_NAME)
+        .bucket(&get_bucket_name())
         .key(&s3_key)
         .upload_id(&upload_id)
         .send()
@@ -283,21 +281,20 @@ pub async fn abort_multipart_upload(
 /// Process uploaded image: generate half-width if needed and create metadata
 pub async fn process_uploaded_image(
     s3_client: &S3Client,
-    project_id: &str,
     block_id: &str,
     image_id: &str,
     extension: &str,
 ) -> Result<ImageMetadata, String> {
     let original_key = format!(
-        "projects/{}/blocks/{}/{}.{}",
-        project_id, block_id, image_id, extension
+        "annotations/blocks/{}/images/{}.{}",
+        block_id, image_id, extension
     );
     
     // Download original image from S3
     tracing::info!("📥 Downloading image from S3: {}", original_key);
     let result = s3_client
         .get_object()
-        .bucket(BUCKET_NAME)
+        .bucket(&get_bucket_name())
         .key(&original_key)
         .send()
         .await
@@ -330,15 +327,15 @@ pub async fn process_uploaded_image(
         let (half_width, half_height, half_bytes) = image_processing::generate_half_width(&image_bytes)?;
         let half_size = half_bytes.len();
         
-        // Upload structure: projects/{pid}/blocks/{bid}/{img_id}/
-        let base_path = format!("projects/{}/blocks/{}/{}", project_id, block_id, image_id);
+        // Upload structure: annotations/blocks/{bid}/images/{img_id}/
+        let base_path = format!("annotations/blocks/{}/images/{}", block_id, image_id);
         
         // Upload full resolution (move original to folder)
         let full_key = format!("{}/{}w.{}", base_path, width, extension);
         tracing::info!("📤 Uploading full resolution to: {}", full_key);
         s3_client
             .put_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&full_key)
             .body(image_bytes.into())
             .send()
@@ -348,7 +345,7 @@ pub async fn process_uploaded_image(
         // Delete old flat file
         s3_client
             .delete_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&original_key)
             .send()
             .await
@@ -359,7 +356,7 @@ pub async fn process_uploaded_image(
         tracing::info!("📤 Uploading half-width to: {}", half_key);
         s3_client
             .put_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&half_key)
             .body(half_bytes.into())
             .content_type("image/jpeg")
@@ -400,7 +397,7 @@ pub async fn process_uploaded_image(
         tracing::info!("📤 Uploading metadata to: {}", metadata_key);
         s3_client
             .put_object()
-            .bucket(BUCKET_NAME)
+            .bucket(&get_bucket_name())
             .key(&metadata_key)
             .body(metadata_json.into_bytes().into())
             .content_type("application/json")

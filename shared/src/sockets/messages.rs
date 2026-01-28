@@ -54,16 +54,4 @@ impl BroadcastMessage {
             data,
         }
     }
-    
-    pub fn _project_created(project: &crate::types::Project) -> Self {
-        Self::_new("project_created", serde_json::to_value(project).unwrap())
-    }
-    
-    pub fn _project_deleted(project_id: &str) -> Self {
-        Self::_new("project_deleted", serde_json::json!({"project_id": project_id}))
-    }
-    
-    pub fn _project_updated(project: &crate::types::Project) -> Self {
-        Self::_new("project_updated", serde_json::to_value(project).unwrap())
-    }
 }

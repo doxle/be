@@ -1,7 +1,8 @@
 use super::connections::{remove_connection, save_connection};
 use super::messages::WebSocketMessage;
 use crate::AppState;
-use crate::{annotations, blocks, classes, images, projects};
+use crate::projects;
+use annotations_block::{blocks, labels};
 use lambda_http::{http::StatusCode, Body, Error, Request, RequestExt, Response};
 use std::{env, sync::Arc};
 
@@ -176,20 +177,20 @@ async fn handle_message(
 
         // Block actions
         "create_block" => {
-            let project_id = message
-                .data
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing project_id")?;
+            // let _project_id = message
+            //     .data
+            //     .get("project_id")
+            //     .and_then(|v| v.as_str())
+            //     .ok_or("Missing project_id")?;
             let body_bytes = serde_json::to_vec(&message.data)?;
-            blocks::create_block(&state.dynamo_client, table_name, project_id, &body_bytes).await
+            blocks::create_block(&state.dynamo_client, table_name, &body_bytes).await
         }
         "update_block" => {
-            let project_id = message
-                .data
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing project_id")?;
+            // let project_id = message
+            //     .data
+            //     .get("project_id")
+            //     .and_then(|v| v.as_str())
+            //     .ok_or("Missing project_id")?;
             let block_id = message
                 .data
                 .get("block_id")
@@ -199,18 +200,17 @@ async fn handle_message(
             blocks::update_block(
                 &state.dynamo_client,
                 table_name,
-                project_id,
                 block_id,
                 &body_bytes,
             )
             .await
         }
         "delete_block" => {
-            let project_id = message
-                .data
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing project_id")?;
+            // let project_id = message
+            //     .data
+            //     .get("project_id")
+            //     .and_then(|v| v.as_str())
+            //     .ok_or("Missing project_id")?;
             let block_id = message
                 .data
                 .get("block_id")
@@ -220,55 +220,9 @@ async fn handle_message(
                 &state.dynamo_client,
                 &state.s3_client,
                 table_name,
-                project_id,
-                block_id,
+                block_id
             )
             .await
-        }
-
-        // Image actions
-        "create_image" => {
-            let block_id = message
-                .data
-                .get("block_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing block_id")?;
-            let body_bytes = serde_json::to_vec(&message.data)?;
-            images::create_image(&state.dynamo_client, table_name, block_id, &body_bytes).await
-        }
-        "update_image" => {
-            let block_id = message
-                .data
-                .get("block_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing block_id")?;
-            let image_id = message
-                .data
-                .get("image_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing image_id")?;
-            let body_bytes = serde_json::to_vec(&message.data)?;
-            images::update_image(
-                &state.dynamo_client,
-                table_name,
-                block_id,
-                image_id,
-                &body_bytes,
-            )
-            .await
-        }
-        "delete_image" => {
-            let block_id = message
-                .data
-                .get("block_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing block_id")?;
-            let image_id = message
-                .data
-                .get("image_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing image_id")?;
-            images::delete_image(&state.dynamo_client, table_name, block_id, image_id).await
         }
 
         // Class actions
@@ -279,7 +233,7 @@ async fn handle_message(
                 .and_then(|v| v.as_str())
                 .ok_or("Missing project_id")?;
             let body_bytes = serde_json::to_vec(&message.data)?;
-            classes::create_class(&state.dynamo_client, table_name, project_id, &body_bytes).await
+            labels::create_label(&state.dynamo_client, table_name, project_id, &body_bytes).await
         }
         "update_class" => {
             let project_id = message
@@ -293,7 +247,7 @@ async fn handle_message(
                 .and_then(|v| v.as_str())
                 .ok_or("Missing class_id")?;
             let body_bytes = serde_json::to_vec(&message.data)?;
-            classes::update_class(
+            labels::update_label(
                 &state.dynamo_client,
                 table_name,
                 project_id,
@@ -313,28 +267,28 @@ async fn handle_message(
                 .get("class_id")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing class_id")?;
-            classes::delete_class(&state.dynamo_client, table_name, project_id, class_id).await
+            labels::delete_label(&state.dynamo_client, table_name, project_id, class_id).await
         }
 
         // Annotation actions
         "create_annotation" => {
+            let block_id = message
+                .data
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing block_id")?;
             let image_id = message
                 .data
                 .get("image_id")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing image_id")?;
-            let project_id = message
-                .data
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing project_id")?;
             let body_bytes = serde_json::to_vec(&message.data)?;
-            annotations::create_annotation(
+            doxle_atoms::drawing::create_annotation(
                 &state.dynamo_client,
                 table_name,
-                &user_id,
+                block_id,
                 image_id,
-                project_id,
+                &user_id,
                 &body_bytes,
             )
             .await
@@ -350,23 +304,22 @@ async fn handle_message(
                 .get("annotation_id")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing annotation_id")?;
-            let project_id = message
-                .data
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing project_id")?;
             let body_bytes = serde_json::to_vec(&message.data)?;
-            annotations::update_annotation(
+            doxle_atoms::drawing::update_annotation(
                 &state.dynamo_client,
                 table_name,
                 image_id,
                 annotation_id,
-                project_id,
                 &body_bytes,
             )
             .await
         }
         "delete_annotation" => {
+            let block_id = message
+                .data
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing block_id")?;
             let image_id = message
                 .data
                 .get("image_id")
@@ -377,17 +330,12 @@ async fn handle_message(
                 .get("annotation_id")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing annotation_id")?;
-            let project_id = message
-                .data
-                .get("project_id")
-                .and_then(|v| v.as_str())
-                .ok_or("Missing project_id")?;
-            annotations::delete_annotation(
+            doxle_atoms::drawing::delete_annotation(
                 &state.dynamo_client,
                 table_name,
+                block_id,
                 image_id,
                 annotation_id,
-                project_id,
             )
             .await
         }

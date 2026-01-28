@@ -1,134 +1,30 @@
 use serde::{Deserialize, Serialize};
 
+
 // ========== USER ==========
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct User {
-    pub user_id: String,
-    pub name: String,
-    pub email: String,
-    pub company: Option<String>,
-    pub role: String, // admin | annotator | builder
-    pub created_at: String,
-    pub last_login: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateUserRequest {
-    pub name: String,
-    pub email: String,
-    pub company: Option<String>,
-    pub role: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateUserRequest {
-    pub name: Option<String>,
-    pub company: Option<String>,
-    pub role: Option<String>,
-}
-
-// ========== PROJECT ==========
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Label {
-    pub name: String,
-    pub color: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Project {
-    pub project_id: String,
-    pub name: String,
-    pub project_type: String, // building | annotation
-    pub locked: bool,
-    pub labels: Vec<Label>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateProjectRequest {
-    pub name: String,
-    pub project_type: String,
-    pub labels: Vec<Label>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateProjectRequest {
-    pub name: Option<String>,
-    pub locked: Option<bool>,
-}
-
-// ========== CLASS ==========
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Class {
-    pub class_id: String,
-    pub project_id: String,
-    pub name: String,
-    pub color: Option<String>,
-    pub properties: Option<serde_json::Value>,
-    pub count: u32,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateClassRequest {
-    pub name: String,
-    pub color: Option<String>,
-    pub properties: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateClassRequest {
-    pub name: Option<String>,
-    pub color: Option<String>,
-    pub properties: Option<serde_json::Value>,
-}
+pub use doxle_atoms::users::model::{User, CreateUserPayload, UpdateUserPayload};
 
 // ========== BLOCK ==========
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Block {
-    pub block_id: String,
-    pub project_id: String,
-    pub name: String,
-    pub state: String, // draft | current | review | complete | paid
-    pub locked: bool,
-    pub assigned_to: Option<String>, // USER#123
-    pub created_at: String,
-}
+pub use doxle_atoms::blocks::model::{Block, CreateBlockPayload, UpdateBlockPayload};
 
-#[derive(Debug, Deserialize)]
-pub struct CreateBlockRequest {
-    pub name: String,
-}
 
-#[derive(Debug, Deserialize)]
-pub struct UpdateBlockRequest {
-    pub name: Option<String>,
-    pub state: Option<String>,
-    pub locked: Option<bool>,
-    pub assigned_to: Option<String>,
-}
+// // ========== UNIT ==========
+// #[derive(Debug, Serialize, Deserialize, Clone)]
+// pub struct Unit {
+//     pub unit_id:String,
+//     pub block_id:String,
+//     pub project_id:String,
+//     pub unit_name:String,
+//     pub unit_state:String, // "todo" | "in_progress" | "done" | "qa"
+//     pub unit_locked:String,
+//     pub unit_assigned_to:String,
+//     pub unit_created_at:String,
+//     pub unit_image_count:Option<u32>,
+//     pub annotated_image_count:Option<u32>,
+// }
 
 // ========== IMAGE ==========
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Image {
-    pub image_id: String,
-    pub block_id: String,
-    pub url: String,
-    pub locked: bool,
-    pub order: Option<i32>,
-    pub uploaded_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreateImageRequest {
-    pub url: String,
-    pub order: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct UpdateImageRequest {
-    pub locked: Option<bool>,
-    pub order: Option<i32>,
-}
+pub use doxle_atoms::media::model::{Image, CreateImagePayload, UpdateImagePayload};
 
 // ========== IMAGE METADATA (Pyramid) ==========
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -144,10 +40,12 @@ pub struct ImageMetadata {
 pub struct ImageLevel {
     pub width: u32,
     pub height: u32,
-    pub path: String, // e.g. "4955w.png" or "2477w.jpg"
+    pub path: String,
     pub size: usize,
-    pub purpose: String, // "full" or "preview"
+    pub purpose: String,
 }
+
+
 
 // ========== ANNOTATION ==========
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -169,28 +67,28 @@ pub enum Geometry {
 pub struct Annotation {
     pub annotation_id: String,
     pub image_id: String,
-    pub class_id: String,
+    pub label_id: String,
     pub geometry: Geometry,
-    pub created_by: String, // USER#123
+    pub created_by: String,
     pub created_at: String,
     pub updated_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateAnnotationRequest {
-    pub class_id: String,
+pub struct CreateAnnotationPayload {
+    pub label_id: String,
     pub geometry: Geometry,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct UpdateAnnotationRequest {
-    pub class_id: Option<String>,
+pub struct UpdateAnnotationPayload {
+    pub label_id: Option<String>,
     pub geometry: Option<Geometry>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct BatchCreateAnnotationsRequest {
-    pub annotations: Vec<CreateAnnotationRequest>,
+pub struct CreateBatchAnnotationsPayload {
+    pub annotations: Vec<CreateAnnotationPayload>,
 }
 
 // ========== COMMENT ==========
@@ -203,3 +101,6 @@ pub struct Comment {
     pub resolved: bool,
     pub created_at: String,
 }
+
+// ========== TASKS ==========
+pub use doxle_atoms::tasks::model::{Task, CreateTaskPayload, UpdateTaskPayload};

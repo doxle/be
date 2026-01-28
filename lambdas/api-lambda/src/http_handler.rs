@@ -1,20 +1,59 @@
 use aws_sdk_dynamodb::{types::AttributeValue, Client as DynamoClient};
 use aws_sdk_s3::Client as S3Client;
+use doxle_atoms as atoms;
 use doxle_shared::{
-    annotations, auth, blocks, classes, cloudfront, image_proxy, images, invites, projects,
+    auth, cloudfront, image_proxy, invites,
     s3_multipart, users, AppState,
 };
+use annotations_block::{self, blocks, labels};
 use lambda_http::{
     http::{Method, StatusCode},
     Body, Error, Request, RequestExt, Response,
 };
 use serde::Deserialize;
 use std::env;
+
+
+/// Validate JWT from cookie and return user_id
+fn validate_jwt_from_cookie(event: &Request) -> Option<String> {
+    // Get cookie header
+    let cookie_header = event.headers().get("Cookie")?.to_str().ok()?;
+    
+    // Extract access_token from cookies
+    let token = doxle_shared::auth::get_cookie_value(cookie_header, "access_token")?;
+    
+    // Decode JWT payload (base64) to get user_id
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    
+    use base64::{engine::general_purpose, Engine as _};
+    let decoded = general_purpose::URL_SAFE_NO_PAD.decode(parts[1]).ok()?;
+    let json_str = String::from_utf8(decoded).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
+    
+    // Check expiration
+    let exp = json.get("exp")?.as_i64()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    
+    if now > exp {
+        tracing::warn!("JWT expired");
+        return None;
+    }
+    
+    // Return user_id (sub claim)
+    json.get("sub")?.as_str().map(|s| s.to_string())
+}
+
+
 use std::sync::Arc;
 
 #[derive(Deserialize)]
 struct AbortUploadRequest {
-    project_id: String,
     block_id: String,
     image_id: String,
     upload_id: String,
@@ -39,14 +78,15 @@ pub(crate) async fn function_handler(
     if method == "OPTIONS" {
         return Ok(Response::builder()
             .status(StatusCode::OK)
-            .header("Access-Control-Allow-Origin", "*")
+            .header("Access-Control-Allow-Origin", "https://doxle.ai")
+            .header("Access-Control-Allow-Credentials", "true")
             .header(
                 "Access-Control-Allow-Methods",
                 "GET,POST,PUT,PATCH,DELETE,OPTIONS",
             )
             .header(
                 "Access-Control-Allow-Headers",
-                "Content-Type,Authorization,X-User-Id",
+                "Content-Type,Authorization,X-User-Id,Cookie",
             )
             .body(Body::Empty)
             .map_err(Box::new)?);
@@ -82,7 +122,7 @@ pub(crate) async fn function_handler(
         let client_id = env::var("COGNITO_CLIENT_ID").expect("COGNITO_CLIENT_ID must be set");
         let client_secret =
             env::var("COGNITO_CLIENT_SECRET").expect("COGNITO_CLIENT_SECRET must be set");
-        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle-annotations".to_string());
+        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle".to_string());
 
         return match method {
             &Method::POST => {
@@ -192,12 +232,13 @@ pub(crate) async fn function_handler(
     if path.starts_with("/proxy-image/") {
         // URL format: /proxy-image/projects/{pid}/blocks/{bid}/{image}.ext
         let image_path = path.strip_prefix("/proxy-image/").unwrap_or("");
-        return image_proxy::proxy_image(&state.s3_client, "doxle-annotations", image_path).await;
+        let bucket_name = env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "doxle-app".to_string());
+        return image_proxy::proxy_image(&state.s3_client, &bucket_name, image_path).await;
     }
 
     // Invites routes (public GET, authenticated POST)
     if path.starts_with("/invites") {
-        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle-annotations".to_string());
+        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle".to_string());
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         return match (method, parts.as_slice()) {
@@ -238,7 +279,7 @@ pub(crate) async fn function_handler(
 
     // Route to user endpoints (JWT validated by API Gateway)
     if path.starts_with("/users") {
-        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle-annotations".to_string());
+        let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle".to_string());
 
         // Get user ID from JWT claims (HTTP API passes JWT claims in request context)
         // For HTTP APIs with JWT authorizer, claims are in requestContext.authorizer.jwt.claims
@@ -289,7 +330,7 @@ pub(crate) async fn function_handler(
     }
 
     // All other routes require auth
-    let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle-annotations".to_string());
+    let table_name = env::var("TABLE_NAME").unwrap_or_else(|_| "doxle".to_string());
 
     // Allow X-User-Id header override for local development
     let user_id = event
@@ -297,124 +338,133 @@ pub(crate) async fn function_handler(
         .get("X-User-Id")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
-        .or_else(|| {
-            event
-                .request_context()
-                .authorizer()
-                .and_then(|auth| auth.jwt.as_ref())
-                .and_then(|jwt| jwt.claims.get("sub"))
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "test-user-123".to_string());
+        .or_else(|| validate_jwt_from_cookie(&event))
+        .unwrap_or_else(|| {
+            tracing::warn!("No valid auth found, using fallback user");
+            "test-user-123".to_string()
+        });
 
-    // Projects routes
-    if path.starts_with("/projects") {
+    
+
+    // Blocks routes (project-free)
+    if path.starts_with("/blocks") {
         let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         return match (method, parts.as_slice()) {
-            // --- PROJECTS ---
-            // POST /projects - create project
-            (&Method::POST, ["projects"]) => {
-                projects::create_project(&state.dynamo_client, &table_name, &user_id, body).await
-            }
-            // GET /projects - list user's projects
-            (&Method::GET, ["projects"]) => {
-                projects::list_user_projects(&state.dynamo_client, &table_name, &user_id).await
-            }
-            // GET /projects/{id} - get project
-            (&Method::GET, ["projects", project_id]) => {
-                projects::get_project(&state.dynamo_client, &table_name, project_id).await
-            }
-            // PATCH /projects/{id} - update project
-            (&Method::PATCH, ["projects", project_id]) => {
-                projects::update_project(&state.dynamo_client, &table_name, project_id, body).await
-            }
-            // DELETE /projects/{id} - delete project
-            (&Method::DELETE, ["projects", project_id]) => {
-                projects::delete_project(
-                    &state.dynamo_client,
-                    &state.s3_client,
-                    &table_name,
-                    project_id,
-                    &user_id,
-                )
-                .await
-            }
-
             // --- BLOCKS ---
-            // GET /projects/{id}/blocks - list project blocks
-            (&Method::GET, ["projects", project_id, "blocks"]) => {
-                blocks::list_project_blocks(&state.dynamo_client, &table_name, project_id).await
+            // GET /blocks - list all blocks
+            (&Method::GET, ["blocks"]) => {
+                match blocks::list_blocks(&state.dynamo_client, &table_name).await {
+                    Ok(resp) => Ok(resp),
+                    Err(e)=> {
+                        tracing::error!("Failed to list blocks: {}", e);
+                        Ok(Response::builder()
+                            .status(StatusCode::INTERNAL_SERVER_ERROR)
+                            .header("Access-Control-Allow-Origin", "*")
+                            .body(
+                                serde_json::json!({
+                                    "error": e.to_string()
+                                }).to_string().into()
+                            )
+                            .map_err(Box::new)?)
+                    }
+                }
             }
-            // POST /projects/{id}/blocks - create block
-            (&Method::POST, ["projects", project_id, "blocks"]) => {
-                blocks::create_block(&state.dynamo_client, &table_name, project_id, body).await
+            // POST /blocks - create block
+            (&Method::POST, ["blocks"]) => {
+                blocks::create_block(&state.dynamo_client, &table_name, body).await
             }
-            //GET /projects/{pid}/blocks/{bid} - get specific block
-            (&Method::GET, ["projects", project_id, "blocks", block_id]) => {
-                blocks::get_block(&state.dynamo_client, &table_name, project_id, block_id).await
+            // GET /blocks/{id} - get specific block
+            (&Method::GET, ["blocks", block_id]) => {
+                blocks::get_block(&state.dynamo_client, &table_name, block_id).await
             }
-            // PATCH /projects/{pid}/blocks/{bid} - update block
-            (&Method::PATCH, ["projects", project_id, "blocks", block_id]) => {
-                blocks::update_block(
-                    &state.dynamo_client,
-                    &table_name,
-                    project_id,
-                    block_id,
-                    body,
-                )
-                .await
+            // PATCH /blocks/{id} - update block
+            (&Method::PATCH, ["blocks", block_id]) => {
+                blocks::update_block(&state.dynamo_client, &table_name, block_id, body).await
             }
-            // DELETE /projects/{pid}/blocks/{bid} - delete block
-            (&Method::DELETE, ["projects", project_id, "blocks", block_id]) => {
+            // DELETE /blocks/{id} - delete block
+            (&Method::DELETE, ["blocks", block_id]) => {
                 blocks::delete_block(
                     &state.dynamo_client,
                     &state.s3_client,
                     &table_name,
-                    project_id,
-                    block_id,
+                    &block_id,
                 )
                 .await
             }
 
-            // --- IMAGES ---
-            // GET /projects/{pid}/blocks/{bid}/images - list images for a block
-            (&Method::GET, ["projects", _project_id, "blocks", block_id, "images"]) => {
-                images::list_block_images(&state.dynamo_client, &table_name, block_id).await
+            // --- LABELS ---
+            // GET /blocks/{bid}/labels - list block labels
+            (&Method::GET, ["blocks", block_id, "labels"]) => {
+                labels::list_block_labels(&state.dynamo_client, &table_name, block_id).await
             }
-            // POST /projects/{pid}/blocks/{bid}/images - create image in  block
-            (&Method::POST, ["projects", _project_id, "blocks", block_id, "images"]) => {
-                images::create_image(&state.dynamo_client, &table_name, block_id, body).await
+            // POST /blocks/{bid}/labels - create label
+            (&Method::POST, ["blocks", block_id, "labels"]) => {
+                labels::create_label(&state.dynamo_client, &table_name, block_id, body).await
             }
-
-            // --- CLASSES ---
-            // GET /projects/{id}/classes - list project classes
-            (&Method::GET, ["projects", project_id, "classes"]) => {
-                classes::list_project_classes(&state.dynamo_client, &table_name, project_id).await
+            // GET /blocks/{bid}/labels/{lid} - get label
+            (&Method::GET, ["blocks", block_id, "labels", label_id]) => {
+                labels::get_label(&state.dynamo_client, &table_name, block_id, label_id).await
             }
-            // POST /projects/{id}/classes - create class
-            (&Method::POST, ["projects", project_id, "classes"]) => {
-                classes::create_class(&state.dynamo_client, &table_name, project_id, body).await
-            }
-            // GET /projects/{pid}/classes/{cid} - get class
-            (&Method::GET, ["projects", project_id, "classes", class_id]) => {
-                classes::get_class(&state.dynamo_client, &table_name, project_id, class_id).await
-            }
-            // PATCH /projects/{pid}/classes/{cid} - update class
-            (&Method::PATCH, ["projects", project_id, "classes", class_id]) => {
-                classes::update_class(
+            // PATCH /blocks/{bid}/labels/{lid} - update label
+            (&Method::PATCH, ["blocks", block_id, "labels", label_id]) => {
+                labels::update_label(
                     &state.dynamo_client,
                     &table_name,
-                    project_id,
-                    class_id,
+                    &block_id,
+                    &label_id,
                     body,
                 )
                 .await
             }
-            // DELETE /projects/{pid}/classes/{cid} - delete class
-            (&Method::DELETE, ["projects", project_id, "classes", class_id]) => {
-                classes::delete_class(&state.dynamo_client, &table_name, project_id, class_id).await
+            // DELETE /blocks/{bid}/labels/{lid} - delete label
+            (&Method::DELETE, ["blocks", block_id, "labels", label_id]) => {
+                labels::delete_label(&state.dynamo_client, &table_name, block_id, label_id).await
             }
+
+            // --- TASKS ---
+            // GET /blocks/{bid}/tasks - list tasks (WITH IMAGES - JOIN LOGIC)
+            (&Method::GET, ["blocks", block_id, "tasks"]) => {
+                annotations_block::tasks::list_block_tasks(&state.dynamo_client, &table_name, block_id).await
+            }
+            // POST /blocks/{bid}/tasks - create task
+            (&Method::POST, ["blocks", block_id, "tasks"]) => {
+                annotations_block::tasks::create_task(&state.dynamo_client, &table_name, block_id, body).await
+            }
+            // GET /blocks/{bid}/tasks/{tid} - get task
+            (&Method::GET, ["blocks", block_id, "tasks", task_id]) => {
+                annotations_block::tasks::get_task(&state.dynamo_client, &table_name, block_id, task_id).await
+            }
+            // PATCH /blocks/{bid}/tasks/{tid} - update task
+            (&Method::PATCH, ["blocks", block_id, "tasks", task_id]) => {
+                annotations_block::tasks::update_task(&state.dynamo_client, &table_name, block_id, task_id, body).await
+            }
+            // DELETE /blocks/{bid}/tasks/{tid} - delete task
+            (&Method::DELETE, ["blocks", block_id, "tasks", task_id]) => {
+                annotations_block::tasks::delete_task(&state.dynamo_client, &table_name, block_id, task_id).await
+            }
+            // --- TASK IMAGES ---
+            // POST /blocks/{bid}/tasks/{tid}/images - create image for task
+            (&Method::POST, ["blocks", block_id, "tasks", task_id, "images"]) => {
+                annotations_block::images::create_image_for_task_handler(
+                    &state.dynamo_client,
+                    &table_name,
+                    &block_id,
+                    &task_id,
+                    body
+                    ).await
+            }
+            // GET /blocks/{bid}/tasks/{tid}/images - list images for task
+            (&Method::GET, ["blocks", block_id, "tasks", task_id, "images"]) =>{
+                annotations_block::images::list_images_for_task_handler(
+                    &state.dynamo_client,
+                    &table_name,
+                    &block_id,
+                    &task_id
+                    ).await
+            }
+
+
             _ => not_found(),
         };
     }
@@ -440,7 +490,6 @@ pub(crate) async fn function_handler(
                 let request: AbortUploadRequest = serde_json::from_slice(body)?;
                 s3_multipart::abort_multipart_upload(
                     &state.s3_client,
-                    request.project_id,
                     request.block_id,
                     request.image_id,
                     request.upload_id,
@@ -463,7 +512,7 @@ pub(crate) async fn function_handler(
                     .query_string_parameters_ref()
                     .and_then(|params| params.first("block_id"))
                     .ok_or("Missing block id query parameter")?;
-                images::get_image(&state.dynamo_client, &table_name, block_id, image_id).await
+                atoms::media::get_image_handler(&state.dynamo_client, &table_name, block_id, image_id).await
             }
             // PATCH /images/{id} - update image
             (&Method::PATCH, ["images", image_id]) => {
@@ -471,7 +520,7 @@ pub(crate) async fn function_handler(
                     .query_string_parameters_ref()
                     .and_then(|params| params.first("block_id"))
                     .ok_or("Missing block id query parameter")?;
-                images::update_image(&state.dynamo_client, &table_name, block_id, image_id, body)
+                atoms::media::update_image_handler(&state.dynamo_client, &table_name, block_id, image_id, body)
                     .await
             }
             // DELETE /images/{id} - delete image
@@ -480,83 +529,66 @@ pub(crate) async fn function_handler(
                     .query_string_parameters_ref()
                     .and_then(|params| params.first("block_id"))
                     .ok_or("Missing block id query parameter")?;
-                images::delete_image(&state.dynamo_client, &table_name, block_id, image_id).await
+                atoms::media::delete_image_handler(&state.dynamo_client, &table_name, block_id, image_id).await
             }
             // GET /images/{id}/annotations - list image annotations
             (&Method::GET, ["images", image_id, "annotations"]) => {
-                annotations::list_image_annotations(&state.dynamo_client, &table_name, image_id)
+                atoms::drawing::list_image_annotations(&state.dynamo_client, &table_name, image_id)
                     .await
             }
-            // POST /images/{id}/annotations - create annotation (requires ?project_id)
+            // POST /images/{id}/annotations - create annotation
             (&Method::POST, ["images", image_id, "annotations"]) => {
-                let project_id = event
+                let block_id = event
                     .query_string_parameters_ref()
-                    .and_then(|params| params.first("project_id"))
-                    .unwrap_or("unknown");
-                annotations::create_annotation(
+                    .and_then(|params| params.first("block_id"))
+                    .ok_or("Missing block id query parameter")?;
+
+
+                atoms::drawing::create_annotation(
                     &state.dynamo_client,
                     &table_name,
+                    &block_id,
+                    &image_id,
                     &user_id,
-                    image_id,
-                    project_id,
-                    body,
-                )
-                .await
-            }
-            // POST /images/{id}/annotations/batch - batch create annotations
-            (&Method::POST, ["images", image_id, "annotations", "batch"]) => {
-                let project_id = event
-                    .query_string_parameters_ref()
-                    .and_then(|params| params.first("project_id"))
-                    .unwrap_or("unknown");
-                annotations::batch_create_annotations(
-                    &state.dynamo_client,
-                    &table_name,
-                    &user_id,
-                    image_id,
-                    project_id,
                     body,
                 )
                 .await
             }
             // GET /images/{iid}/annotations/{aid} - get annotation
             (&Method::GET, ["images", image_id, "annotations", annotation_id]) => {
-                annotations::get_annotation(
+                atoms::drawing::get_annotation(
                     &state.dynamo_client,
                     &table_name,
-                    image_id,
-                    annotation_id,
+                    &image_id,
+                    &annotation_id,
                 )
                 .await
             }
             // PATCH /images/{iid}/annotations/{aid} - update annotation
             (&Method::PATCH, ["images", image_id, "annotations", annotation_id]) => {
-                let project_id = event
-                    .query_string_parameters_ref()
-                    .and_then(|params| params.first("project_id"))
-                    .unwrap_or("unknown");
-                annotations::update_annotation(
+                atoms::drawing::update_annotation(
                     &state.dynamo_client,
                     &table_name,
-                    image_id,
-                    annotation_id,
-                    project_id,
+                    &image_id,
+                    &annotation_id,
                     body,
                 )
                 .await
             }
             // DELETE /images/{iid}/annotations/{aid} - delete annotation
             (&Method::DELETE, ["images", image_id, "annotations", annotation_id]) => {
-                let project_id = event
-                    .query_string_parameters_ref()
-                    .and_then(|params| params.first("project_id"))
-                    .unwrap_or("unknown");
-                annotations::delete_annotation(
+
+                let block_id = event
+                .query_string_parameters_ref()
+                .and_then(|params| params.first("block_id"))
+                .ok_or("Missing block id query parameter")?;
+
+                atoms::drawing::delete_annotation(
                     &state.dynamo_client,
                     &table_name,
-                    image_id,
-                    annotation_id,
-                    project_id,
+                    &block_id,
+                    &image_id,
+                    &annotation_id,
                 )
                 .await
             }

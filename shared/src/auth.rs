@@ -8,6 +8,55 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::str::from_utf8;
 
+// Cookie configuration
+const COOKIE_DOMAIN: &str = ".doxle.ai";
+const ACCESS_TOKEN_COOKIE: &str = "access_token";
+const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
+
+// Allowed origins for CORS
+const ALLOWED_ORIGINS: &[&str] = &["https://doxle.ai", "http://localhost:8080"];
+
+/// Get CORS origin - returns the origin if allowed, otherwise None
+pub fn get_cors_origin(origin: Option<&str>) -> &'static str {
+    match origin {
+        Some(o) if ALLOWED_ORIGINS.contains(&o) => {
+            if o == "https://doxle.ai" { "https://doxle.ai" }
+            else { "http://localhost:8080" }
+        }
+        _ => "https://doxle.ai" // default
+    }
+}
+
+/// Create a Set-Cookie header value for httpOnly secure cookie
+pub fn create_cookie(name: &str, value: &str, max_age_secs: i64, http_only: bool) -> String {
+    let mut cookie = format!(
+        "{}={}; Domain={}; Path=/; Max-Age={}; SameSite=None; Secure",
+        name, value, COOKIE_DOMAIN, max_age_secs
+    );
+    if http_only {
+        cookie.push_str("; HttpOnly");
+    }
+    cookie
+}
+
+/// Create cookie that clears/expires immediately
+pub fn clear_cookie(name: &str) -> String {
+    format!(
+        "{}=; Domain={}; Path=/; Max-Age=0; SameSite=None; Secure; HttpOnly",
+        name, COOKIE_DOMAIN
+    )
+}
+
+/// Extract a cookie value from Cookie header
+pub fn get_cookie_value(cookie_header: &str, name: &str) -> Option<String> {
+    cookie_header
+        .split(';')
+        .map(|s| s.trim())
+        .find(|s| s.starts_with(&format!("{}=", name)))
+        .and_then(|s| s.split('=').nth(1))
+        .map(|s| s.to_string())
+}
+
 #[derive(Deserialize)]
 pub struct LoginRequest {
     pub email: String,
@@ -116,10 +165,27 @@ pub async fn login(
                     expires_in: auth_result.expires_in(),
                 };
 
+                // Create httpOnly cookies
+                let access_cookie = create_cookie(
+                    ACCESS_TOKEN_COOKIE,
+                    &login_response.access_token,
+                    login_response.expires_in as i64,
+                    false, // access_token readable by JS (for now)
+                );
+                let refresh_cookie = create_cookie(
+                    REFRESH_TOKEN_COOKIE,
+                    &login_response.refresh_token,
+                    60 * 60 * 24 * 30, // 30 days
+                    true, // httpOnly - JS cannot read
+                );
+
                 Ok(Response::builder()
                     .status(StatusCode::OK)
                     .header("Content-Type", "application/json")
-                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Access-Control-Allow-Origin", "https://doxle.ai")
+                    .header("Access-Control-Allow-Credentials", "true")
+                    .header("Set-Cookie", access_cookie)
+                    .header("Set-Cookie", refresh_cookie)
                     .body(serde_json::to_string(&login_response)?.into())
                     .map_err(Box::new)?)
             } else {
@@ -321,7 +387,7 @@ pub async fn signup(
 pub async fn refresh_token(
     cognitio_client: &CognitoClient,
     client_id: &str,
-    client_secret: &str,
+    _client_secret: &str,
     body: &Body,
 ) -> Result<Response<Body>, Error> {
     let body_str = match body {
@@ -371,10 +437,25 @@ pub async fn refresh_token(
                         .to_string(),
                     expires_in: auth_result.expires_in(),
                 };
+                 // Create httpOnly cookies
+                let access_cookie = create_cookie(
+                    ACCESS_TOKEN_COOKIE,
+                    &login_response.access_token,
+                    login_response.expires_in as i64,
+                    false,
+                );
+                let refresh_cookie = create_cookie(
+                    REFRESH_TOKEN_COOKIE,
+                    &login_response.refresh_token,
+                    60 * 60 * 24 * 30, // 30 days for refresh token
+                    true,
+                );
                 let response = Response::builder()
                     .status(StatusCode::OK)
-                    .header("Content-Type", "application/json")
-                    .header("Access-Control-Allow-Origin", "*")
+                    .header("Access-Control-Allow-Origin", "https://doxle.ai")
+                    .header("Access-Control-Allow-Credentials", "true")
+                    .header("Set-Cookie", access_cookie)
+                    .header("Set-Cookie", refresh_cookie)
                     .body(serde_json::to_string(&login_response)?.into())
                     .map_err(Box::new)?;
                 Ok(response)
