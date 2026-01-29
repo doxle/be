@@ -2,7 +2,7 @@ use aws_sdk_dynamodb::{types::AttributeValue, Client as DynamoClient};
 use aws_sdk_s3::Client as S3Client;
 use doxle_atoms as atoms;
 use doxle_shared::{
-    auth, cloudfront, image_proxy, invites,
+    auth, cloudfront, contact, image_proxy, invites,
     s3_multipart, users, AppState,
 };
 use annotations_block::{self, blocks, labels};
@@ -234,6 +234,28 @@ pub(crate) async fn function_handler(
         let image_path = path.strip_prefix("/proxy-image/").unwrap_or("");
         let bucket_name = env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "doxle-app".to_string());
         return image_proxy::proxy_image(&state.s3_client, &bucket_name, image_path).await;
+    }
+
+    // Contact form route (public - no auth required)
+    if path == "/contact" {
+        return match method {
+            &Method::POST => {
+                contact::handle_contact(&state.ses_client, body).await
+            }
+            _ => {
+                let resp = Response::builder()
+                    .status(StatusCode::METHOD_NOT_ALLOWED)
+                    .header("Content-Type", "application/json")
+                    .header("Access-Control-Allow-Origin", "*")
+                    .body(
+                        serde_json::json!({"error": "Method not allowed"})
+                            .to_string()
+                            .into(),
+                    )
+                    .map_err(Box::new)?;
+                Ok(resp)
+            }
+        };
     }
 
     // Invites routes (public GET, authenticated POST)

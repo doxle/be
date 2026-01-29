@@ -213,3 +213,114 @@ This invitation expires in 7 days. If you didn't expect this, you can safely ign
 
     Ok(())
 }
+
+/// Send contact form email via AWS SES
+pub async fn send_contact_email(
+    ses_client: &SesClient,
+    from_email_address: &str,
+    message: &str,
+) -> Result<(), String> {
+    let to_email = "help@doxle.com";
+    
+    let html_body = format!(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <style>
+        body {{
+            font-family: 'HelveticaNeue', Helvetica, Arial, sans-serif;
+            line-height: 1.6;
+            color: #333333;
+            background: #ffffff;
+            margin: 0;
+            padding: 20px;
+        }}
+        .container {{
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 30px;
+            border: 1px solid #e5e5e5;
+        }}
+        .title {{
+            font-size: 20px;
+            font-weight: 300;
+            margin-bottom: 20px;
+        }}
+        .from {{
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 20px;
+        }}
+        .message {{
+            font-size: 15px;
+            white-space: pre-wrap;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2 class="title">New Contact Form Message</h2>
+        <p class="from"><strong>From:</strong> {}</p>
+        <div class="message">{}</div>
+    </div>
+</body>
+</html>"#,
+        from_email_address, message
+    );
+
+    let text_body = format!(
+        "New Contact Form Message\n\nFrom: {}\n\nMessage:\n{}",
+        from_email_address, message
+    );
+
+    let destination = Destination::builder()
+        .to_addresses(to_email)
+        .build();
+
+    let subject = Content::builder()
+        .data(format!("Contact Form: Message from {}", from_email_address))
+        .charset("UTF-8")
+        .build()
+        .map_err(|e| format!("Failed to build subject: {:?}", e))?;
+
+    let html_content = Content::builder()
+        .data(html_body)
+        .charset("UTF-8")
+        .build()
+        .map_err(|e| format!("Failed to build HTML content: {:?}", e))?;
+
+    let text_content = Content::builder()
+        .data(text_body)
+        .charset("UTF-8")
+        .build()
+        .map_err(|e| format!("Failed to build text content: {:?}", e))?;
+
+    let body = Body::builder()
+        .html(html_content)
+        .text(text_content)
+        .build();
+
+    let message_obj = Message::builder()
+        .subject(subject)
+        .body(body)
+        .build();
+
+    let email_content = EmailContent::builder()
+        .simple(message_obj)
+        .build();
+
+    let ses_from_email = std::env::var("SES_FROM_EMAIL")
+        .unwrap_or_else(|_| "noreply@doxle.ai".to_string());
+    
+    ses_client
+        .send_email()
+        .from_email_address(ses_from_email)
+        .destination(destination)
+        .content(email_content)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to send email: {:?}", e))?;
+
+    Ok(())
+}

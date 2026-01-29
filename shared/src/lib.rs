@@ -9,6 +9,7 @@ pub mod s3;
 pub mod s3_multipart;
 pub mod invites;
 pub mod email;
+pub mod contact;
 pub mod cloudfront;
 pub mod image_proxy;
 pub mod image_processing;
