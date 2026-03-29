@@ -1,0 +1,149 @@
+{
+  "Comment": "Doxle block full backup orchestration",
+  "StartAt": "InitJob",
+  "States": {
+    "InitJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "init",
+          "backup_id.$": "$.backup_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id"
+        }
+      },
+      "ResultSelector": {
+        "done.$": "$.Payload.done",
+        "include_image_copy.$": "$.Payload.include_image_copy"
+      },
+      "ResultPath": "$.init",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "PilotFinalize"
+    },
+    "PilotFinalize": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "pilot",
+          "backup_id.$": "$.backup_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id"
+        }
+      },
+      "ResultPath": "$.pilot",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "NeedImageCopy"
+    },
+    "NeedImageCopy": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.init.done",
+          "BooleanEquals": true,
+          "Next": "FinalizeBackup"
+        }
+      ],
+      "Default": "CopyImageBatch"
+    },
+    "CopyImageBatch": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "copy_batch",
+          "backup_id.$": "$.backup_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "batch_size": 50
+        }
+      },
+      "ResultSelector": {
+        "copy_done.$": "$.Payload.done",
+        "copied_count.$": "$.Payload.copied_count"
+      },
+      "ResultPath": "$.copy",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "CopyDone"
+    },
+    "CopyDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.copy.copy_done",
+          "BooleanEquals": true,
+          "Next": "FinalizeBackup"
+        }
+      ],
+      "Default": "CopyImageBatch"
+    },
+    "FinalizeBackup": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "finalize",
+          "backup_id.$": "$.backup_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id"
+        }
+      },
+      "ResultPath": "$.finalize",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "End": true
+    }
+  }
+}

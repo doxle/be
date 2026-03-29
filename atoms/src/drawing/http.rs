@@ -6,6 +6,7 @@ use super::service;
 pub async fn create_annotation(
     client: &DynamoClient,
     table_name: &str,
+    project_id: Option<&str>,
     block_id:&str,
     image_id: &str,
     user_id: &str,
@@ -13,7 +14,7 @@ pub async fn create_annotation(
 ) -> Result<Response<Body>, Error> {
     let payload: CreateAnnotationPayload = serde_json::from_slice(body)?;
     
-    match service::create_annotation(client, table_name, block_id, image_id, user_id, payload).await {
+    match service::create_annotation(client, table_name, project_id, block_id, image_id, user_id, payload).await {
         Ok(annotation) => Ok(Response::builder()
             .status(StatusCode::CREATED)
             .header("Content-Type", "application/json")
@@ -53,11 +54,12 @@ pub async fn list_image_annotations(
 pub async fn delete_annotation(
     client: &DynamoClient,
     table_name: &str,
+    project_id: Option<&str>,
     block_id:&str,
     image_id: &str,
     annotation_id: &str,
 ) -> Result<Response<Body>, Error> {
-    match service::delete_annotation(client, table_name, block_id, image_id, annotation_id).await {
+    match service::delete_annotation(client, table_name, project_id, block_id, image_id, annotation_id).await {
         Ok(_) => Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header("Access-Control-Allow-Origin", "*")
@@ -75,13 +77,14 @@ pub async fn delete_annotation(
 pub async fn update_annotation(
     client: &DynamoClient,
     table_name: &str,
+    block_id: &str,
     image_id: &str,
     annotation_id: &str,
     body: &[u8],
 ) -> Result<Response<Body>, Error> {
     let payload: UpdateAnnotationPayload = serde_json::from_slice(body)?;
 
-    match service::update_annotation(client, table_name, image_id, annotation_id, payload).await {
+    match service::update_annotation(client, table_name, block_id, image_id, annotation_id, payload).await {
         Ok(_) => Ok(Response::builder()
             .status(StatusCode::NO_CONTENT)
             .header("Access-Control-Allow-Origin", "*")

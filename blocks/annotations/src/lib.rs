@@ -5,3 +5,8 @@ pub mod blocks;
 pub mod annotations;
 pub mod handler;
 pub mod tasks;
+pub mod bulk_import;
+pub mod export;
+pub mod backup_jobs;
+pub mod import_jobs;
+pub mod reconcile_jobs;

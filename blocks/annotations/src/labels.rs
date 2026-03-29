@@ -27,21 +27,37 @@ const FLOOR_PLAN_ORDER: [&str; 20] = [
     "legend",
 ];
 
-const ELEVATION_ORDER: [&str; 15] = [
+const ELEVATION_ORDER: [&str; 31] = [
     "gf-wall",
     "gf-window",
     "gf-roof",
     "ff-wall",
     "ff-window",
     "ff-roof",
-    "sf-wall",
-    "sf-window",
-    "sf-roof",
+    "2f-wall",
+    "2f-window",
+    "2f-roof",
+    "3f-wall",
+    "3f-window",
+    "3f-roof",
+    "basement-walls",
+    "basement-windows",
     "skylight",
+    "balustrade",
+    "chimney",
+    "heating-cooling",
+    "hws",
+    "ramp",
+    "retaining-wall",
+    "solar",
+    "window-screening",
     "fence",
+    "stairs",
+    "scale",
     "dims",
     "area",
     "title",
+    "schedule",
     "legend",
 ];
 
@@ -55,6 +71,106 @@ const ROOF_PLAN_ORDER: [&str; 1] = [
     "box-gutter",
 ];
 
+
+/// Default colors for labels (20 maximally contrasting colors)
+const DEFAULT_COLORS: [&str; 20] = [
+    "#E6194B", "#3CB44B", "#FFE119", "#4363D8", "#F58231",
+    "#911EB4", "#42D4F4", "#F032E6", "#BFEF45", "#FABED4",
+    "#469990", "#DCBEFF", "#9A6324", "#FFFAC8", "#800000",
+    "#AAFFC3", "#808000", "#FFD8B1", "#000075", "#A9A9A9",
+];
+
+/// Create default labels for a block based on block_type
+pub async fn create_default_labels_for_block(
+    client: &DynamoClient,
+    table_name: &str,
+    block_id: &str,
+    block_type: &str,
+) -> Result<Vec<Label>, Error> {
+    let label_names: &[&str] = match block_type {
+        "floor" => &FLOOR_PLAN_ORDER,
+        "elevation" => &ELEVATION_ORDER,
+        "electrical" => &ELECTRICAL_PLAN_ORDER,
+        "roof" => &ROOF_PLAN_ORDER,
+        _ => &[], // no default labels for generic annotation/file/building blocks
+    };
+
+    if label_names.is_empty() {
+        return Ok(Vec::new());
+    }
+
+
+    let mut labels = Vec::new();
+    let mut write_requests = Vec::new();
+    let pk = format!("BLOCK#{}", block_id);
+
+
+    for (i, label_name) in label_names.iter().enumerate() {
+        let label_id = uuid::Uuid::new_v4().to_string();
+        let sk = format!("LABEL#{}", label_id);
+        
+        // Use hardcoded color if available, otherwise use default palette
+        let color = get_label_color(label_name)
+            .unwrap_or(DEFAULT_COLORS[i % DEFAULT_COLORS.len()])
+            .to_string();
+
+        
+        let mut item = std::collections::HashMap::new();    
+        item.insert("PK".to_string(), AttributeValue::S(pk.clone()));
+        item.insert("SK".to_string(), AttributeValue::S(sk));
+        item.insert("label_name".to_string(), AttributeValue::S(label_name.to_string()));
+        item.insert("label_color".to_string(), AttributeValue::S(color.clone()));
+
+        write_requests.push(
+              aws_sdk_dynamodb::types::WriteRequest::builder()
+                .put_request(
+                    aws_sdk_dynamodb::types::PutRequest::builder()
+                        .set_item(Some(item))
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        );
+
+        labels.push(Label {
+            label_id,
+            block_id: block_id.to_string(),
+            label_name: label_name.to_string(),
+            label_color: color,
+            label_properties: None,
+            label_count: 0,
+            bbox_count:0,
+            polygon_count:0,
+        });
+    
+    }
+
+    // Batch write - if this returns Ok, data is persisted
+    client
+        .batch_write_item()
+        .request_items(table_name, write_requests)
+        .send()
+        .await?;
+
+    println!("📋 Created {} default labels for block {}", label_names.len(), block_id);
+    Ok(labels)
+}
+
+
+
+
+/// Returns the hardcoded color for a label based on its name
+/// Returns None if no hardcoded color exists for the label
+fn get_label_color(label_name: &str) -> Option<&'static str> {
+    match label_name {
+        "fp-outside" => Some("#007AFF"),  // doxle-blue
+        "fp-inside" => Some("#FF0000"),           // bright red
+        "ewalls" => Some("#00CC00"),              // bright green
+        "windows" => Some("#00BFFF"),             // deep sky blue
+        _ => None,
+    }
+}
+
 /// Sorts the block labels in order
 fn order_index_for(block_type:&str, label_name:&str) -> Option<u32> {
     let list: &[&str] = match block_type {
@@ -62,7 +178,7 @@ fn order_index_for(block_type:&str, label_name:&str) -> Option<u32> {
         "elevation" => &ELEVATION_ORDER,
         "electrical" => &ELECTRICAL_PLAN_ORDER,
         "roof" => &ROOF_PLAN_ORDER,
-        _ => return None,
+        _ => &FLOOR_PLAN_ORDER,
     };
     
     list.iter()
@@ -83,14 +199,18 @@ pub async fn create_label(
     let pk = format!("BLOCK#{}", block_id);
     let sk = format!("LABEL#{}", label_id);
     
+    // Use hardcoded color based on label_name, ignore frontend-provided color
+    let label_color = get_label_color(&req.label_name)
+        .unwrap_or(&req.label_color)
+        .to_string();
+    
     let mut builder = client
         .put_item()
         .table_name(table_name)
         .item("PK", AttributeValue::S(pk))
         .item("SK", AttributeValue::S(sk))
         .item("label_name", AttributeValue::S(req.label_name.clone()))
-        .item("label_count", AttributeValue::N("0".to_string()))
-        .item("label_color", AttributeValue::S(req.label_color.clone()));
+        .item("label_color", AttributeValue::S(label_color.clone()));
     
     if let Some(label_properties) = &req.label_properties {
         builder = builder.item("label_properties", AttributeValue::S(serde_json::to_string(label_properties)?));
@@ -102,9 +222,11 @@ pub async fn create_label(
         label_id: label_id.clone(),
         block_id: block_id.to_string(),
         label_name: req.label_name,
-        label_color: req.label_color,
+        label_color,
         label_properties: req.label_properties,
         label_count: 0,
+        bbox_count:0,
+        polygon_count:0,
     };
     
     Ok(Response::builder()
@@ -134,10 +256,19 @@ pub async fn get_label(
         .await?;
     
     if let Some(item) = result.item() {
+
+
+        let images = doxle_atoms::media::service::load_images_for_block(client, table_name, block_id).await.unwrap_or_default();
+        let label_name =  item.get("label_name").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let label_count:u32 = images.iter().filter_map(|img| img.labels_count.get(&label_name)).sum();
+        let bbox_count:u32 = images.iter().filter_map(|img| img.bbox_count.get(&label_name)).sum();
+        let polygon_count:u32 = images.iter().filter_map(|img| img.polygon_count.get(&label_name)).sum();
+        
         let label = Label {
             label_id: label_id.to_string(),
             block_id: block_id.to_string(),
-            label_name: item.get("label_name").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default(),
+            label_name,
+            
             label_color: item.get("label_color")
                 .and_then(|v| v.as_s().ok())
                 .map(|s| s.to_string())
@@ -145,8 +276,13 @@ pub async fn get_label(
             label_properties: item.get("label_properties")
                 .and_then(|v| v.as_s().ok())
                 .and_then(|s| serde_json::from_str(s).ok()),
-            label_count: item.get("label_count").and_then(|v| v.as_n().ok()).and_then(|n| n.parse().ok()).unwrap_or(0),
+            label_count,
+            bbox_count,
+            polygon_count,
+           
+            
         };
+
         
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -154,7 +290,8 @@ pub async fn get_label(
             .header("Access-Control-Allow-Origin", "*")
             .body(serde_json::to_string(&label)?.into())
             .map_err(Box::new)?)
-    } else {
+    } 
+    else {
         Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header("Content-Type", "application/json")
@@ -168,6 +305,17 @@ pub async fn get_label(
 pub async fn fetch_labels_for_block(
     client: &DynamoClient,
     table_name: &str,
+    block_id: &str,
+) -> Result<Vec<Label>, Error> {
+    // Use empty project_id — block_type sorting will be skipped
+    fetch_labels_for_block_with_project(client, table_name, "", block_id).await
+}
+
+/// Load labels for a block with project context (for block_type sorting)
+pub async fn fetch_labels_for_block_with_project(
+    client: &DynamoClient,
+    table_name: &str,
+    project_id: &str,
     block_id: &str,
 ) -> Result<Vec<Label>, Error> {
     let pk = format!("BLOCK#{}", block_id);
@@ -184,28 +332,33 @@ pub async fn fetch_labels_for_block(
     let mut labels = Vec::new();
     
     for item in result.items() {
-            if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
-                if let Some(label_id) = sk.strip_prefix("LABEL#") {
-                    let label = Label {
-                        label_id: label_id.to_string(),
-                        block_id: block_id.to_string(),
-                        label_name: item.get("label_name").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default(),
-                        label_color: item.get("label_color")
-                            .and_then(|v| v.as_s().ok())
-                            .map(|s| s.to_string())
-                            .expect("label_color missing"),
-                        label_properties: item.get("label_properties")
-                            .and_then(|v| v.as_s().ok())
-                            .and_then(|s| serde_json::from_str(s).ok()),
-                        label_count: item.get("label_count").and_then(|v| v.as_n().ok()).and_then(|n| n.parse().ok()).unwrap_or(0),
-                    };
-                    labels.push(label);
-                }
+        if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
+            if let Some(label_id) = sk.strip_prefix("LABEL#") {
+                let label = Label {
+                    label_id: label_id.to_string(),
+                    block_id: block_id.to_string(),
+                    label_name: item.get("label_name").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default(),
+                    label_color: item.get("label_color")
+                        .and_then(|v| v.as_s().ok())
+                        .map(|s| s.to_string())
+                        .expect("label_color missing"),
+                    label_count:0,
+                    bbox_count:0,
+                    polygon_count:0,
+                    label_properties: item.get("label_properties")
+                        .and_then(|v| v.as_s().ok())
+                        .and_then(|s| serde_json::from_str(s).ok()),
+                   
+                };
+                labels.push(label);
             }
+        }
     }
 
+    // Label counts are not computed here — use reconcile for accurate counts.
+
     // Sort the labels
-    if let Some(block_type) = get_block_type(client, table_name, block_id).await? {
+    if let Some(block_type) = get_block_type(client, table_name, project_id, block_id).await? {
         labels.sort_by(|a, b| {
             let a_idx = order_index_for(&block_type, &a.label_name);
             let b_idx = order_index_for(&block_type, &b.label_name);
@@ -225,10 +378,17 @@ pub async fn fetch_labels_for_block(
 pub async fn list_block_labels(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
 ) -> Result<Response<Body>, Error> {
-    let labels = fetch_labels_for_block(client, table_name, block_id).await?;
+    let labels = fetch_labels_for_block_with_project(client, table_name, project_id, block_id).await?;
+    println!("📋 Returning {} labels for block {}:", labels.len(), block_id);
+
+    for l in &labels {
+        println!("   - {} ({}): count={}", l.label_name, l.label_id, l.label_count);
+    }
     
+
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json")
@@ -240,9 +400,13 @@ pub async fn list_block_labels(
 async fn get_block_type(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
 ) -> Result<Option<String>, Error> {
-    let pk = "BLOCK".to_string();
+    if project_id.is_empty() {
+        return Ok(None); // Skip block_type lookup when no project context
+    }
+    let pk = format!("PROJECT#{}", project_id);
     let sk = format!("BLOCK#{}", block_id);
 
     let result = client

@@ -1,6 +1,7 @@
 use lambda_http::{run, service_fn, tracing, Error, Request};
 use aws_sdk_cognitoidentityprovider::Client as CognitoClient;
 use aws_sdk_dynamodb::Client as DynamoClient;
+use aws_sdk_lambda::Client as LambdaClient;
 use aws_sdk_apigatewaymanagement::Client as ApiGatewayManagementClient;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sesv2::Client as SesClient;
@@ -27,6 +28,7 @@ async fn main() -> Result<(), Error> {
     let state = AppState::new(
         CognitoClient::new(&config),
         DynamoClient::new(&config),
+        LambdaClient::new(&config),
         S3Client::new(&config),
         SesClient::new(&config),
         api_gateway_client,

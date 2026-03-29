@@ -10,6 +10,7 @@ aws-sdk-dynamodb = { workspace = true }
 aws-sdk-apigatewaymanagement = { workspace = true }
 aws-sdk-s3 = { workspace = true }
 aws-sdk-sesv2 = { workspace = true }
+aws-sdk-lambda = { workspace = true }
 
 lambda_http = { workspace = true }
 

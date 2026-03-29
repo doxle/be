@@ -8,7 +8,12 @@ pub async fn send_invite_email(
     invite_code: &str,
     frontend_url: &str,
 ) -> Result<(), String> {
-    let signup_link = format!("{}/signup?code={}", frontend_url, invite_code);
+    // Use root URL + query param so production static hosting doesn't 404 on deep links.
+    // Frontend will detect `?code=...` and route to signup client-side.
+    let base_url = frontend_url.trim_end_matches('/');
+    let signup_link = format!("{}/?code={}", base_url, invite_code);
+    
+    let icon_url = "https://send-email-logo.s3.ap-southeast-2.amazonaws.com/logo.png";
     
     let html_body = format!(
         r#"<!DOCTYPE html>
@@ -16,134 +21,74 @@ pub async fn send_invite_email(
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body {{
-            font-family: 'HelveticaNeue', Helvetica, Arial, sans-serif;
-            line-height: 1.6;
-            color: #333333;
-            background: #ffffff;
-            margin: 0;
-            padding: 0;
-        }}
-        .wrapper {{
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 60px 20px;
-        }}
-        .container {{
-            background: #ffffff;
-            border: 1px solid #e5e5e5;
-            padding: 60px 50px;
-        }}
-        .logo {{
-            font-size: 24px;
-            font-weight: 300;
-            color: #000000;
-            margin: 0 0 40px 0;
-            text-align: center;
-            letter-spacing: -0.5px;
-        }}
-        .title {{
-            font-size: 20px;
-            font-weight: 300;
-            color: #000000;
-            margin: 0 0 24px 0;
-        }}
-        .text {{
-            font-size: 15px;
-            font-weight: 400;
-            color: #333333;
-            margin: 0 0 24px 0;
-            line-height: 1.6;
-        }}
-        .button-wrapper {{
-            text-align: center;
-            margin: 32px 0;
-        }}
-        .button {{
-            display: inline-block;
-            width: 100%;
-            max-width: 280px;
-            padding: 18px 24px;
-            background: #4f5bf8;
-            color: #ffffff;
-            text-decoration: none;
-            font-weight: 400;
-            font-size: 15px;
-            text-align: center;
-            box-sizing: border-box;
-        }}
-        .button:hover {{
-            background: rgba(79, 91, 248, 0.9);
-        }}
-        .code-label {{
-            font-size: 13px;
-            font-weight: 500;
-            color: #666666;
-            margin: 32px 0 8px 0;
-        }}
-        .code {{
-            background: #f5f5f5;
-            padding: 14px 16px;
-            font-family: 'Courier New', monospace;
-            font-size: 13px;
-            color: #000000;
-            border: 1px solid #e5e5e5;
-            word-break: break-all;
-            margin: 0 0 16px 0;
-        }}
-        .footer {{
-            margin-top: 48px;
-            padding-top: 24px;
-            border-top: 1px solid #e5e5e5;
-            font-size: 13px;
-            font-weight: 300;
-            color: #666666;
-            text-align: center;
-        }}
-        .footer-text {{
-            margin: 0 0 8px 0;
-        }}
-        @media only screen and (max-width: 600px) {{
-            .container {{
-                padding: 40px 24px;
-            }}
-            .wrapper {{
-                padding: 40px 16px;
-            }}
-        }}
-    </style>
 </head>
-<body>
-    <div class="wrapper">
-        <div class="container">
-            <h1 class="logo">Doxle</h1>
-            
-            <h2 class="title">You've been invited</h2>
-            
-            <p class="text">
-                You've been invited to join Doxle. Click the button below to create your account and get started.
-            </p>
-            
-            <div class="button-wrapper">
-                <a href="{}" class="button">Create Account</a>
-            </div>
-            
-            <div class="code-label">Or use this invite code:</div>
-            <div class="code">{}</div>
-            
-            <p class="text" style="margin-top: 32px; font-size: 13px; color: #666666;">
-                This invitation expires in 7 days. If you didn't expect this, you can safely ignore this email.
-            </p>
-            
-            <div class="footer">
-                <p class="footer-text">© 2025 Doxle</p>
-            </div>
-        </div>
-    </div>
+<body style="margin: 0; padding: 0; font-family: Helvetica, Arial, sans-serif; background: #ffffff;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+        <tr>
+            <td align="center" style="padding: 60px 20px;">
+                <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="max-width: 600px; background: #ffffff; border: 1px solid #e5e5e5;">
+                    <tr>
+                        <td style="padding: 60px 50px;">
+                            <!-- Logo -->
+                            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                                <tr>
+                                    <td align="center" style="padding-bottom: 40px;">
+                                        <img src="{}" alt="Doxle" width="40" style="display: block; height: auto;" />
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- Title -->
+                            <h2 style="font-family: Helvetica, Arial, sans-serif; font-size: 20px; font-weight: 300; color: #000000; margin: 0 0 24px 0;">You've been invited</h2>
+                            
+                            <!-- Text -->
+                            <p style="font-family: Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 400; color: #333333; margin: 0 0 24px 0; line-height: 1.6;">
+                                You've been invited to join Doxle. Click the button below to create your account and get started.
+                            </p>
+                            
+                            <!-- Button -->
+                            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                                <tr>
+                                    <td align="center" style="padding: 32px 0;">
+                                        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                                            <tr>
+                                                <td bgcolor='#4f5bf8' style="background: #4f5bf8; background-color: #4f5bf8; padding: 18px 48px;">
+                                                    <a href="{}" style="font-family: Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 400; color: #ffffff !important; text-decoration: none !important; display: block; -webkit-text-fill-color: #ffffff !important;">Create Account</a>
+                                                </td>
+                                            </tr>
+                                        </table>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- Code label -->
+                            <p style="font-family: Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 500; color: #666666; margin: 32px 0 8px 0;">Or use this invite code:</p>
+                            
+                            <!-- Code -->
+                            <p style="font-family: 'Courier New', monospace; font-size: 13px; color: #000000; background: #f5f5f5; padding: 14px 16px; border: 1px solid #e5e5e5; margin: 0 0 16px 0; word-break: break-all;">{}</p>
+                            
+                            <!-- Expiry note -->
+                            <p style="font-family: Helvetica, Arial, sans-serif; font-size: 13px; color: #666666; margin: 32px 0 0 0; line-height: 1.6;">
+                                This invitation expires in 7 days. If you didn't expect this, you can safely ignore this email.
+                            </p>
+                            
+                            <!-- Footer -->
+                            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="margin-top: 48px; border-top: 1px solid #e5e5e5;">
+                                <tr>
+                                    <td align="center" style="padding-top: 24px;">
+                                        <p style="font-family: Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 300; color: #666666; margin: 0;">© 2025 Doxle</p>
+                                    </td>
+                                </tr>
+                            </table>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
 </body>
 </html>"#,
-        signup_link, invite_code
+        icon_url, signup_link, invite_code
     );
 
     let text_body = format!(
@@ -200,7 +145,7 @@ This invitation expires in 7 days. If you didn't expect this, you can safely ign
         .build();
 
     let from_email = std::env::var("SES_FROM_EMAIL")
-        .unwrap_or_else(|_| "noreply@doxle.ai".to_string());
+        .unwrap_or_else(|_| "Doxle <noreply@doxle.com>".to_string());
     
     ses_client
         .send_email()
@@ -260,7 +205,7 @@ pub async fn send_contact_email(
 </head>
 <body>
     <div class="container">
-        <h2 class="title">New Contact Form Message</h2>
+        <h2 class="title">New message from Doxle</h2>
         <p class="from"><strong>From:</strong> {}</p>
         <div class="message">{}</div>
     </div>
@@ -279,7 +224,7 @@ pub async fn send_contact_email(
         .build();
 
     let subject = Content::builder()
-        .data(format!("Contact Form: Message from {}", from_email_address))
+        .data(format!("New message from Doxle: {}", from_email_address))
         .charset("UTF-8")
         .build()
         .map_err(|e| format!("Failed to build subject: {:?}", e))?;
@@ -311,7 +256,7 @@ pub async fn send_contact_email(
         .build();
 
     let ses_from_email = std::env::var("SES_FROM_EMAIL")
-        .unwrap_or_else(|_| "noreply@doxle.ai".to_string());
+        .unwrap_or_else(|_| "Doxle <noreply@doxle.com>".to_string());
     
     ses_client
         .send_email()

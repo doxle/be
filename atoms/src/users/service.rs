@@ -1,7 +1,69 @@
 use lambda_http::{Body, Error, Response};
 use aws_sdk_dynamodb::Client as DynamoClient;
-use super::model::{User, CreateUserPayload, UpdateUserPayload};
+use super::model::{User, UserRole, CreateUserPayload, UpdateUserPayload};
 use aws_sdk_dynamodb::types::AttributeValue;
+
+/// Convert a string to Title Case (capitalize first letter of each word).
+/// Splits on whitespace, dots, underscores, and dashes, then joins with a space.
+pub fn to_title_case(s: &str) -> String {
+    s.split(|c: char| c.is_whitespace() || c == '.' || c == '_' || c == '-')
+        .filter(|w| !w.is_empty())
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// List all users from DynamoDB
+pub async fn list_users(
+    client: &DynamoClient,
+    table_name: &str,
+) -> Result<Response<Body>, Error> {
+    let result = client
+        .query()
+        .table_name(table_name)
+        .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
+        .expression_attribute_values(":pk", AttributeValue::S("USER".to_string()))
+        .expression_attribute_values(":sk_prefix", AttributeValue::S("USER#".to_string()))
+        .send()
+        .await
+        .map_err(|e| format!("DynamoDB query error: {}", e))?;
+
+    let mut users = Vec::new();
+    for item in result.items() {
+        let sk = item.get("SK").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let user_id = sk.strip_prefix("USER#").unwrap_or("").to_string();
+        let user_name = item.get("user_name").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let user_email = item.get("user_email").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let user_company = item.get("user_company").and_then(|v| v.as_s().ok()).map(|s| s.to_string());
+        let user_role = item.get("user_role").and_then(|v| v.as_s().ok()).map(|s| UserRole::from_str_loose(s)).unwrap_or(UserRole::Annotator);
+        let user_created_at = item.get("user_created_at").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let user_last_login = item.get("last_login").and_then(|v| v.as_s().ok()).map(|s| s.to_string());
+
+        users.push(User {
+            user_id,
+            user_name,
+            user_email,
+            user_company,
+            user_role,
+            user_created_at,
+            user_last_login,
+        });
+    }
+
+    let resp = Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(serde_json::to_string(&users)?.into())
+        .map_err(Box::new)?;
+    Ok(resp)
+}
 
 /// Create user in DynamoDB after Cognito signup
 /// This is called once after user signs up in Cognito
@@ -12,19 +74,27 @@ pub async fn create_user(
     body: &[u8],
 ) -> Result<Response<Body>, Error> {
     let req: CreateUserPayload = serde_json::from_slice(body)?;
+    let title_name = to_title_case(&req.user_name);
+
+    // Resolve role: super-admin always gets Admin, otherwise use requested role
+    let role = if let Ok(super_admin) = std::env::var("SUPER_ADMIN_SUB") {
+        if user_id == super_admin { UserRole::Admin } else { req.user_role.clone() }
+    } else {
+        req.user_role.clone()
+    };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let pk = format!("USER#{}", user_id);
+    let sk = format!("USER#{}", user_id);
 
-    // Store user in DynamoDB with PK=USER#cognito-id, SK=USER#cognito-id
+    // Store user in DynamoDB with PK=USER, SK=USER#cognito-id
     let mut put_request = client
         .put_item()
         .table_name(table_name)
-        .item("PK", AttributeValue::S(pk.clone()))
-        .item("SK", AttributeValue::S(pk.clone()))
-        .item("user_name", AttributeValue::S(req.user_name.clone()))
+        .item("PK", AttributeValue::S("USER".to_string()))
+        .item("SK", AttributeValue::S(sk))
+        .item("user_name", AttributeValue::S(title_name.clone()))
         .item("user_email", AttributeValue::S(req.user_email.clone()))
-        .item("user_role", AttributeValue::S(req.user_role.clone()))
+        .item("user_role", AttributeValue::S(role.as_str().to_string()))
         .item("user_created_at", AttributeValue::S(now.clone()));
     
     if let Some(company) = &req.user_company {
@@ -35,10 +105,10 @@ pub async fn create_user(
 
     let user = User {
         user_id: user_id.to_string(),
-        user_name: req.user_name,
+        user_name: title_name,
         user_email: req.user_email,
         user_company: req.user_company,
-        user_role: req.user_role,
+        user_role: role,
         user_created_at: now,
         user_last_login: None,
     };
@@ -58,13 +128,13 @@ pub async fn get_user(
     table_name: &str,
     user_id: &str,
 ) -> Result<Response<Body>, Error> {
-    let pk = format!("USER#{}", user_id);
+    let sk = format!("USER#{}", user_id);
 
     let result = client
         .get_item()
         .table_name(table_name)
-        .key("PK", AttributeValue::S(pk.clone()))
-        .key("SK", AttributeValue::S(pk.clone()))
+        .key("PK", AttributeValue::S("USER".to_string()))
+        .key("SK", AttributeValue::S(sk.clone()))
         .send()
         .await
         .map_err(|e| format!("DynamoDB get_item error: {}", e))?;
@@ -73,10 +143,10 @@ pub async fn get_user(
         let mut user_name = item.get("user_name").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
         let user_email = item.get("user_email").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
         if user_name.trim().is_empty() {
-            user_name = user_email.split('@').next().unwrap_or("User").to_string();
+            user_name = to_title_case(user_email.split('@').next().unwrap_or("User"));
         }
         let user_company = item.get("user_company").and_then(|v| v.as_s().ok()).map(|s| s.to_string());
-        let user_role = item.get("user_role").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let user_role = item.get("user_role").and_then(|v| v.as_s().ok()).map(|s| UserRole::from_str_loose(s)).unwrap_or(UserRole::Annotator);
         let user_created_at = item.get("user_created_at").and_then(|v| v.as_s().ok()).map(|s| s.to_string()).unwrap_or_default();
         let _last_login = item.get("user_last_login").and_then(|v| v.as_s().ok()).map(|s| s.to_string());
         
@@ -85,8 +155,8 @@ pub async fn get_user(
         let _ = client
             .update_item()
             .table_name(table_name)
-            .key("PK", AttributeValue::S(pk.clone()))
-            .key("SK", AttributeValue::S(pk.clone()))
+            .key("PK", AttributeValue::S("USER".to_string()))
+            .key("SK", AttributeValue::S(sk.clone()))
             .update_expression("SET last_login = :login")
             .expression_attribute_values(":login", AttributeValue::S(now.clone()))
             .send()
@@ -128,7 +198,7 @@ pub async fn update_user(
     body: &[u8],
 ) -> Result<Response<Body>, Error> {
     let req: UpdateUserPayload = serde_json::from_slice(body)?;
-    let pk = format!("USER#{}", user_id);
+    let sk = format!("USER#{}", user_id);
 
     let mut update_expr = vec![];
     let mut expr_names = std::collections::HashMap::new();
@@ -148,15 +218,15 @@ pub async fn update_user(
     if let Some(role) = req.user_role {
         update_expr.push("#user_role = :user_role");
         expr_names.insert("#user_role".to_string(), "user_role".to_string());
-        expr_values.insert(":user_role".to_string(), AttributeValue::S(role));
+        expr_values.insert(":user_role".to_string(), AttributeValue::S(role.as_str().to_string()));
     }
     
     if !update_expr.is_empty() {
         let mut builder = client
             .update_item()
             .table_name(table_name)
-            .key("PK", AttributeValue::S(pk.clone()))
-            .key("SK", AttributeValue::S(pk))
+            .key("PK", AttributeValue::S("USER".to_string()))
+            .key("SK", AttributeValue::S(sk))
             .update_expression(format!("SET {}", update_expr.join(", ")));
         
         for (k, v) in expr_names {

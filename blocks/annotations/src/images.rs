@@ -6,7 +6,9 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 struct CreateTaskImageRequest {
-	url:String,
+	image_id: String,
+	image_name: String,
+	url: String,
 }
 
 
@@ -15,6 +17,7 @@ struct CreateTaskImageRequest {
 pub async fn create_image_for_task_handler(
 	client: &DynamoClient,
 	table_name: &str,
+	project_id: &str,
 	block_id: &str,
 	task_id: &str,
 	body: &[u8],
@@ -44,11 +47,15 @@ pub async fn create_image_for_task_handler(
     let result = media::create_image_for_task(
     		client,
     		table_name,
+    		project_id,
     		block_id,
     		task_id,
+    		req.image_id,
+    		req.image_name.clone(),
     		req.url,
     		None, //order
-
+    		None, //width
+    		None, //height
     ).await;
 
     match result {

@@ -5,6 +5,9 @@ members = [
     "blocks/annotations",
     "lambdas/api-lambda",
     "lambdas/stream-lambda",
+    "lambdas/backup-worker",
+    "lambdas/import-worker",
+    "lambdas/reconcile-worker",
 ]
 resolver = "2"
 
@@ -16,6 +19,8 @@ aws-sdk-dynamodb = "1.96"
 aws-sdk-apigatewaymanagement = "1.87"
 aws-sdk-s3 = "1.108"
 aws-sdk-sesv2 = "1.101"
+aws-sdk-sfn = "1.90"
+aws-sdk-lambda = "1.101"
 
 # Lambda runtime
 lambda_http = "0.13.0"
@@ -36,6 +41,8 @@ chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
 rsa = { version = "0.9", features = ["sha2", "sha1"] }
 image = "0.24"
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+roxmltree = "0.20"
 
 # Async runtime
 tokio = { version = "1", features = ["macros"] }

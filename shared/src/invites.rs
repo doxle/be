@@ -1,5 +1,6 @@
 use lambda_http::{Body, Error, Response, http::StatusCode};
 use aws_sdk_dynamodb::Client as DynamoClient;
+use aws_sdk_cognitoidentityprovider::Client as CognitoClient;
 use aws_sdk_sesv2::Client as SesClient;
 use serde::{Deserialize, Serialize};
 use chrono::Utc;
@@ -9,6 +10,7 @@ use std::env;
 #[derive(Debug, Deserialize)]
 pub struct CreateInviteRequest {
     pub email: String,
+    pub role: String,
     #[serde(default = "default_expires_days")]
     pub expires_days: i64,
 }
@@ -21,7 +23,9 @@ fn default_expires_days() -> i64 {
 pub struct InviteResponse {
     pub invite_code: String,
     pub email: String,
+    pub role: String,
     pub expires_at: String,
+    pub created_at: String,
     pub status: String,
 }
 
@@ -75,6 +79,7 @@ pub async fn create_invite(
         .item("email", aws_sdk_dynamodb::types::AttributeValue::S(request.email.clone()))
         .item("status", aws_sdk_dynamodb::types::AttributeValue::S("pending".to_string()))
         .item("created_by", aws_sdk_dynamodb::types::AttributeValue::S(admin_user_id.to_string()))
+        .item("role", aws_sdk_dynamodb::types::AttributeValue::S(request.role.clone()))
         .item("created_at", aws_sdk_dynamodb::types::AttributeValue::S(now.to_rfc3339()))
         .item("expires_at", aws_sdk_dynamodb::types::AttributeValue::S(expires_at.to_rfc3339()))
         .send()
@@ -103,7 +108,9 @@ pub async fn create_invite(
             let response = InviteResponse {
                 invite_code,
                 email: request.email,
+                role: request.role,
                 expires_at: expires_at.to_rfc3339(),
+                created_at: now.to_rfc3339(),
                 status: "pending".to_string(),
             };
 
@@ -197,13 +204,120 @@ pub async fn mark_invite_used(
         .key("SK", aws_sdk_dynamodb::types::AttributeValue::S("METADATA".to_string()))
         .update_expression("SET #status = :used, used_at = :now")
         .expression_attribute_names("#status", "status")
-        .expression_attribute_values(":used", aws_sdk_dynamodb::types::AttributeValue::S("used".to_string()))
+        .expression_attribute_values(":used", aws_sdk_dynamodb::types::AttributeValue::S("active".to_string()))
         .expression_attribute_values(":now", aws_sdk_dynamodb::types::AttributeValue::S(Utc::now().to_rfc3339()))
         .send()
         .await
         .map_err(|e| format!("Failed to mark invite as used: {:?}", e))?;
 
     Ok(())
+}
+
+/// List all invites (admin-only)
+pub async fn list_invites(
+    client: &DynamoClient,
+    table_name: &str,
+) -> Result<Response<Body>, Error> {
+    // Scan for all INVITE# records
+    let mut invites = Vec::new();
+    let mut last_key = None;
+
+    loop {
+        let mut scan = client
+            .scan()
+            .table_name(table_name)
+            .filter_expression("begins_with(PK, :pk_prefix)")
+            .expression_attribute_values(":pk_prefix", aws_sdk_dynamodb::types::AttributeValue::S("INVITE#".to_string()));
+
+        if let Some(key) = last_key {
+            scan = scan.set_exclusive_start_key(Some(key));
+        }
+
+        let result = scan.send().await.map_err(|e| format!("DynamoDB scan error: {:?}", e))?;
+
+        for item in result.items() {
+            let invite_code = item.get("invite_code").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+            let email = item.get("email").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+            let role = item.get("role").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+            let status = item.get("status").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+            let expires_at = item.get("expires_at").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+            let created_at = item.get("created_at").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+
+            invites.push(InviteResponse {
+                invite_code,
+                email,
+                role,
+                status,
+                expires_at,
+                created_at,
+            });
+        }
+
+        match result.last_evaluated_key() {
+            Some(key) => last_key = Some(key.clone()),
+            None => break,
+        }
+    }
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/json")
+        .header("Access-Control-Allow-Origin", "*")
+        .body(serde_json::to_string(&invites)?.into())
+        .map_err(Box::new)?)
+}
+
+/// Delete an invite (admin-only)
+/// Also removes the corresponding Cognito user if they already signed up.
+pub async fn delete_invite(
+    client: &DynamoClient,
+    cognito_client: &CognitoClient,
+    table_name: &str,
+    invite_code: &str,
+) -> Result<Response<Body>, Error> {
+    // Fetch the invite first to get the email
+    let invite_result = client
+        .get_item()
+        .table_name(table_name)
+        .key("PK", aws_sdk_dynamodb::types::AttributeValue::S(format!("INVITE#{}", invite_code)))
+        .key("SK", aws_sdk_dynamodb::types::AttributeValue::S("METADATA".to_string()))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch invite: {:?}", e))?;
+
+    // Try to delete the Cognito user if we have the email
+    if let Some(item) = invite_result.item() {
+        if let Some(email) = item.get("email").and_then(|v| v.as_s().ok()) {
+            if let Ok(user_pool_id) = env::var("COGNITO_USER_POOL_ID") {
+                match cognito_client
+                    .admin_delete_user()
+                    .user_pool_id(&user_pool_id)
+                    .username(email)
+                    .send()
+                    .await
+                {
+                    Ok(_) => tracing::info!("Deleted Cognito user: {}", email),
+                    Err(e) => tracing::warn!("Could not delete Cognito user (may not exist): {:?}", e),
+                }
+            }
+        }
+    }
+
+    // Delete the invite from DynamoDB
+    client
+        .delete_item()
+        .table_name(table_name)
+        .key("PK", aws_sdk_dynamodb::types::AttributeValue::S(format!("INVITE#{}", invite_code)))
+        .key("SK", aws_sdk_dynamodb::types::AttributeValue::S("METADATA".to_string()))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to delete invite: {:?}", e))?;
+
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header("Access-Control-Allow-Origin", "*")
+        .body(Body::Empty)
+        .map_err(Box::new)?)
 }
 
 /// Get invite details (for frontend to pre-fill email)
@@ -224,13 +338,17 @@ pub async fn get_invite(
         Ok(output) => {
             if let Some(item) = output.item() {
                 let email = item.get("email").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+                let role = item.get("role").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
                 let status = item.get("status").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
                 let expires_at = item.get("expires_at").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
+                let created_at = item.get("created_at").and_then(|v| v.as_s().ok()).unwrap_or(&String::new()).clone();
 
                 let response = InviteResponse {
                     invite_code: invite_code.to_string(),
                     email: email.to_string(),
+                    role: role.to_string(),
                     expires_at: expires_at.to_string(),
+                    created_at: created_at.to_string(),
                     status: status.to_string(),
                 };
 

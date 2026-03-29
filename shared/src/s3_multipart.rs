@@ -13,6 +13,8 @@ pub struct InitiateUploadRequest {
     pub file_name: String,
     pub content_type: String,
     pub file_size: usize,
+    #[serde(default = "default_upload_namespace")]
+    pub upload_namespace: String,
 }
     
 #[derive(Serialize)]
@@ -37,6 +39,8 @@ pub struct CompleteMultipartRequest {
     pub upload_id: String,
     pub extension: String,
     pub parts: Vec<CompletedPart>,
+    #[serde(default = "default_upload_namespace")]
+    pub upload_namespace: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -55,6 +59,27 @@ fn get_bucket_name()->String{
     std::env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "doxle-app".to_string())
 }
 
+fn default_upload_namespace() -> String {
+    "annotation".to_string()
+}
+
+fn upload_prefix(upload_namespace: &str) -> &'static str {
+    match upload_namespace {
+        "file" | "files" => "files",
+        _ => "annotations",
+    }
+}
+
+fn build_s3_key(upload_namespace: &str, block_id: &str, image_id: &str, extension: &str) -> String {
+    format!(
+        "{}/blocks/{}/images/{}.{}",
+        upload_prefix(upload_namespace),
+        block_id,
+        image_id,
+        extension
+    )
+}
+
 /// Initiate upload - returns single or multipart presigned URLs
 pub async fn initiate_upload(
     s3_client: &S3Client,
@@ -68,13 +93,7 @@ pub async fn initiate_upload(
         .unwrap_or("jpg")
         .to_string();
     
-    // Updated S3 key structure: annotations/blocks/{block_id}/images/{image_id}.{ext}
-    let s3_key = format!(
-        "annotations/blocks/{}/images/{}.{}",
-        request.block_id,
-        image_id,
-        extension
-    );
+    let s3_key = build_s3_key(&request.upload_namespace, &request.block_id, &image_id, &extension);
     
     let is_multipart = request.file_size >= MULTIPART_THRESHOLD;
     
@@ -175,11 +194,11 @@ pub async fn complete_multipart_upload(
     s3_client: &S3Client,
     request: CompleteMultipartRequest,
 ) -> Result<Response<Body>, Error> {
-    let s3_key = format!(
-        "annotations/blocks/{}/images/{}.{}",
-        request.block_id,
-        request.image_id,
-        request.extension
+    let s3_key = build_s3_key(
+        &request.upload_namespace,
+        &request.block_id,
+        &request.image_id,
+        &request.extension,
     );
     
     // Only complete multipart if there are parts (multipart upload)
@@ -254,13 +273,9 @@ pub async fn abort_multipart_upload(
     image_id: String,
     upload_id: String,
     extension: String,
+    upload_namespace: String,
 ) -> Result<Response<Body>, Error> {
-    let s3_key = format!(
-        "annotations/blocks/{}/images/{}.{}",
-        block_id,
-        image_id,
-        extension
-    );
+    let s3_key = build_s3_key(&upload_namespace, &block_id, &image_id, &extension);
     
     s3_client
         .abort_multipart_upload()
@@ -284,11 +299,9 @@ pub async fn process_uploaded_image(
     block_id: &str,
     image_id: &str,
     extension: &str,
+    upload_namespace: &str,
 ) -> Result<ImageMetadata, String> {
-    let original_key = format!(
-        "annotations/blocks/{}/images/{}.{}",
-        block_id, image_id, extension
-    );
+    let original_key = build_s3_key(upload_namespace, block_id, image_id, extension);
     
     // Download original image from S3
     tracing::info!("📥 Downloading image from S3: {}", original_key);
@@ -327,8 +340,7 @@ pub async fn process_uploaded_image(
         let (half_width, half_height, half_bytes) = image_processing::generate_half_width(&image_bytes)?;
         let half_size = half_bytes.len();
         
-        // Upload structure: annotations/blocks/{bid}/images/{img_id}/
-        let base_path = format!("annotations/blocks/{}/images/{}", block_id, image_id);
+        let base_path = format!("{}/blocks/{}/images/{}", upload_prefix(upload_namespace), block_id, image_id);
         
         // Upload full resolution (move original to folder)
         let full_key = format!("{}/{}w.{}", base_path, width, extension);

@@ -139,6 +139,64 @@ pub fn format_cookie_headers(
         .collect()
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_cookie_headers_with_domain() {
+        let cookies = vec![
+            ("CloudFront-Policy".into(), "abc123".into()),
+            ("CloudFront-Key-Pair-Id".into(), "KXXX".into()),
+        ];
+        let headers = format_cookie_headers(cookies, Some(".doxle.ai"), true, 3600);
+        assert_eq!(headers.len(), 2);
+        assert!(headers[0].contains("Domain=.doxle.ai"));
+        assert!(headers[0].contains("Max-Age=3600"));
+        assert!(headers[0].contains("HttpOnly"));
+        assert!(headers[0].contains("Secure"));
+        assert!(headers[0].contains("SameSite=None"));
+    }
+
+    #[test]
+    fn format_cookie_headers_without_domain() {
+        let cookies = vec![
+            ("CloudFront-Policy".into(), "xyz".into()),
+        ];
+        let headers = format_cookie_headers(cookies, None, false, 7200);
+        assert_eq!(headers.len(), 1);
+        assert!(!headers[0].contains("Domain="));
+        assert!(headers[0].contains("Max-Age=7200"));
+        assert!(!headers[0].contains("Secure"));
+    }
+
+    #[test]
+    fn format_cookie_headers_empty_domain_string() {
+        let cookies = vec![("Test".into(), "val".into())];
+        let headers = format_cookie_headers(cookies, Some(""), false, 100);
+        // Empty domain should fall through to no-domain branch
+        assert!(!headers[0].contains("Domain="));
+    }
+
+    #[test]
+    fn policy_struct_serializes_correctly() {
+        let policy = CloudFrontPolicy {
+            statement: vec![PolicyStatement {
+                resource: "https://cdn.doxle.ai/*".into(),
+                condition: PolicyCondition {
+                    date_less_than: DateLessThan {
+                        aws_epoch_time: 1234567890,
+                    },
+                },
+            }],
+        };
+        let json = serde_json::to_string(&policy).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["Statement"][0]["Resource"], "https://cdn.doxle.ai/*");
+        assert_eq!(parsed["Statement"][0]["Condition"]["DateLessThan"]["AWS:EpochTime"], 1234567890);
+    }
+}
+
 /// Issue CloudFront signed cookies on successful authentication
 pub fn issue_signed_cookies_response(
     user_id: &str,

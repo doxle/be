@@ -1,0 +1,35 @@
+{
+  "Comment": "Doxle block annotation-count reconciliation orchestration",
+  "StartAt": "RunReconcile",
+  "States": {
+    "RunReconcile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "reconcile",
+          "reconcile_job_id.$": "$.reconcile_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "force.$": "$.force"
+        }
+      },
+      "ResultPath": "$.reconcile",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "End": true
+    }
+  }
+}

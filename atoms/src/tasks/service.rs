@@ -1,6 +1,6 @@
 use aws_sdk_dynamodb::Client as DynamoClient;
 use aws_sdk_dynamodb::types::AttributeValue;
-use super::model::{Task, CreateTaskPayload};
+use super::model::{Task, TaskState, CreateTaskPayload};
 use std::collections::HashMap;
 
 /// Load all tasks for a block (pure domain logic, no HTTP)
@@ -11,63 +11,85 @@ pub async fn load_tasks_for_block(
     block_id: &str,
 ) -> Result<Vec<Task>, String> {
     let pk = format!("BLOCK#{}", block_id);
-    
-    let result = client
-        .query()
-        .table_name(table_name)
-        .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
-        .expression_attribute_values(":pk", AttributeValue::S(pk))
-        .expression_attribute_values(":sk_prefix", AttributeValue::S("TASK#".to_string()))
-        .send()
-        .await
-        .map_err(|e| format!("DynamoDB query error: {}", e))?;
-    
     let mut tasks = Vec::new();
-    for item in result.items() {
-        if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
-            if let Some(task_id) = sk.strip_prefix("TASK#") {
-                let task = Task {
-                    task_id: task_id.to_string(),
-                    block_id: block_id.to_string(),
-                    task_name: item
-                        .get("task_name")
-                        .and_then(|v| v.as_s().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                    task_state: item
-                        .get("task_state")
-                        .and_then(|v| v.as_s().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                    assignee: item
-                        .get("assignee")
-                        .and_then(|v| v.as_s().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                    checked_by: item
-                        .get("checked_by")
-                        .and_then(|v| v.as_s().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                    locked: item
-                        .get("locked")
-                        .and_then(|v| v.as_bool().ok())
-                        .copied()
-                        .unwrap_or(false),
-                    image_count:item
-                        .get("image_count")
-                        .and_then(|v| v.as_n().ok())
-                        .and_then(|n| n.parse().ok())
-                        .unwrap_or(0),
-                    created_at: item
-                        .get("created_at")
-                        .and_then(|v| v.as_s().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_default(),
-                    images: vec![],  // Filled in later by be/blocks/* when joining with media
-                };
-                tasks.push(task);
+    let mut last_evaluated_key: Option<HashMap<String, AttributeValue>> = None;
+
+    loop {
+        let mut query = client
+            .query()
+            .table_name(table_name)
+            .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
+            .expression_attribute_values(":pk", AttributeValue::S(pk.clone()))
+            .expression_attribute_values(":sk_prefix", AttributeValue::S("TASK#".to_string()));
+
+        if let Some(start_key) = last_evaluated_key.clone() {
+            query = query.set_exclusive_start_key(Some(start_key));
+        }
+
+        let result = query
+            .send()
+            .await
+            .map_err(|e| format!("DynamoDB query error: {}", e))?;
+
+        for item in result.items() {
+            if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
+                if let Some(task_id) = sk.strip_prefix("TASK#") {
+                    let task = Task {
+                        task_id: task_id.to_string(),
+                        block_id: block_id.to_string(),
+                        task_name: item
+                            .get("task_name")
+                            .and_then(|v| v.as_s().ok())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                        task_state: item
+                            .get("task_state")
+                            .and_then(|v| v.as_s().ok())
+                            .map(|s| TaskState::from_str_loose(s))
+                            .unwrap_or(TaskState::Todo),
+                        assignee: item
+                            .get("assignee")
+                            .and_then(|v| v.as_s().ok())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                        checked_by: item
+                            .get("checked_by")
+                            .and_then(|v| v.as_s().ok())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                        locked: item
+                            .get("locked")
+                            .and_then(|v| v.as_bool().ok())
+                            .copied()
+                            .unwrap_or(false),
+                        annotation_count: item
+                            .get("annotation_count")
+                            .and_then(|v| v.as_n().ok())
+                            .and_then(|n| n.parse().ok())
+                            .unwrap_or(0),
+                        image_count:item
+                            .get("image_count")
+                            .and_then(|v| v.as_n().ok())
+                            .and_then(|n| n.parse().ok())
+                            .unwrap_or(0),
+                        created_at: item
+                            .get("created_at")
+                            .and_then(|v| v.as_s().ok())
+                            .map(|s| s.to_string())
+                            .unwrap_or_default(),
+                        images: vec![],  // Filled in later by be/blocks/* when joining with media
+                        labels_count: std::collections::HashMap::new(),
+                        bbox_count: std::collections::HashMap::new(),
+                        polygon_count: std::collections::HashMap::new(),
+                    };
+                    tasks.push(task);
+                }
             }
+        }
+
+        match result.last_evaluated_key() {
+            Some(next_key) => last_evaluated_key = Some(next_key.clone()),
+            None => break,
         }
     }
     
@@ -92,7 +114,7 @@ pub async fn create_task(
         .item("PK", AttributeValue::S(pk))
         .item("SK", AttributeValue::S(sk))
         .item("task_name", AttributeValue::S(payload.task_name.clone()))
-        .item("task_state", AttributeValue::S("todo".to_string()))
+        .item("task_state", AttributeValue::S(TaskState::Todo.as_str().to_string()))
         .item("image_count", AttributeValue::N("0".to_string()))
         .item("created_at", AttributeValue::S(now.clone()))
         .item("locked", AttributeValue::Bool(false));
@@ -110,14 +132,17 @@ pub async fn create_task(
         task_id,
         block_id: block_id.to_string(),
         task_name: payload.task_name,
-        task_state: "todo".to_string(),
+        task_state: TaskState::Todo,
         assignee: payload.assignee.unwrap_or_default(),
         checked_by: payload.checked_by.unwrap_or_default(),
         locked: false,
         image_count:0,
+        annotation_count:0,
         images: vec![],
         created_at: now,
-
+        labels_count: std::collections::HashMap::new(),
+        bbox_count: std::collections::HashMap::new(),
+        polygon_count: std::collections::HashMap::new(),
     })
 }
 
@@ -152,8 +177,8 @@ pub async fn get_task(
             task_state: item
                 .get("task_state")
                 .and_then(|v| v.as_s().ok())
-                .map(|s| s.to_string())
-                .unwrap_or_default(),
+                .map(|s| TaskState::from_str_loose(s))
+                .unwrap_or(TaskState::Todo),
             assignee: item
                 .get("assignee")
                 .and_then(|v| v.as_s().ok())
@@ -174,12 +199,20 @@ pub async fn get_task(
                 .and_then(|v| v.as_n().ok())
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(0),
+            annotation_count:item
+                .get("annotation_count")
+                .and_then(|v| v.as_n().ok())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0),
             created_at: item
                 .get("created_at")
                 .and_then(|v| v.as_s().ok())
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
             images: vec![],
+            labels_count: std::collections::HashMap::new(),
+            bbox_count: std::collections::HashMap::new(),
+            polygon_count: std::collections::HashMap::new(),
         })
     } else {
         Err("Task not found".to_string())
@@ -190,6 +223,7 @@ pub async fn get_task(
 pub async fn update_task(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
     task_id: &str,
     payload: super::model::UpdateTaskPayload,
@@ -198,7 +232,7 @@ pub async fn update_task(
     let sk = format!("TASK#{}", task_id);
 
     // This is to update the task count
-    let old_task  = get_task(client, table_name, block_id, task_id).await?;
+    let old_task = get_task(client, table_name, block_id, task_id).await?;
     let old_task_state = old_task.task_state.clone();
     let old_task_image_count = old_task.image_count as i64;
 
@@ -217,7 +251,7 @@ pub async fn update_task(
     if let Some(ref state) = payload.task_state {
         update_expr.push("#task_state = :task_state");
         expr_names.insert("#task_state".to_string(), "task_state".to_string());
-        expr_values.insert(":task_state".to_string(), AttributeValue::S(state.to_string()));
+        expr_values.insert(":task_state".to_string(), AttributeValue::S(state.as_str().to_string()));
     }
 
     if let Some(assignee) = payload.assignee {
@@ -237,19 +271,19 @@ pub async fn update_task(
 
         // Update approved_image_count only when state changes
 
-        if let Some(new_state) = payload.task_state.as_deref(){
-            let delta:i64 = match (&*old_task_state, new_state) {
-                ("done", "done") => 0,
-                ("done", _) => -old_task_image_count,
-                (_, "done") => old_task_image_count,
-                _=>0,
+        if let Some(ref new_state) = payload.task_state {
+            let delta: i64 = match (&old_task_state, new_state) {
+                (TaskState::Approved, TaskState::Approved) => 0,
+                (TaskState::Approved, _) => -old_task_image_count,
+                (_, TaskState::Approved) => old_task_image_count,
+                _ => 0,
             };
 
             if delta != 0 {
                 client
                     .update_item()
                     .table_name(table_name)
-                    .key("PK", AttributeValue::S("BLOCK".to_string()))
+                    .key("PK", AttributeValue::S(format!("PROJECT#{}", project_id)))
                     .key("SK", AttributeValue::S(format!("BLOCK#{}", block_id)))
                     .update_expression("SET approved_image_count = approved_image_count + :delta")
                     .expression_attribute_values(":delta", AttributeValue::N(delta.to_string()))
@@ -285,6 +319,7 @@ pub async fn update_task(
 pub async fn delete_task(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
     task_id: &str,
 ) -> Result<(), String> {
@@ -295,7 +330,7 @@ pub async fn delete_task(
     for image in task_images {
          // Del Annotations for Images
          let image_id = image.image_id.as_str();
-         crate::media::service::delete_image(client, table_name, block_id, image_id).await?;
+         crate::media::service::delete_image(client, table_name, project_id, block_id, image_id).await?;
 
     }
 

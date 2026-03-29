@@ -17,6 +17,7 @@ pub mod image_processing;
 use aws_sdk_apigatewaymanagement::Client as ApiGatewayManagementClient;
 use aws_sdk_cognitoidentityprovider::Client as CognitoClient;
 use aws_sdk_dynamodb::Client as DynamoClient;
+use aws_sdk_lambda::Client as LambdaClient;
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sesv2::Client as SesClient;
 use std::sync::Arc;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 pub struct AppState {
     pub cognito_client: CognitoClient,
     pub dynamo_client: DynamoClient,
+    pub lambda_client: LambdaClient,
     pub s3_client: S3Client,
     pub ses_client: SesClient,
     pub api_gateway_client: Option<ApiGatewayManagementClient>,
@@ -34,6 +36,7 @@ impl AppState {
     pub fn new(
         cognito_client: CognitoClient,
         dynamo_client: DynamoClient,
+        lambda_client: LambdaClient,
         s3_client: S3Client,
         ses_client: SesClient,
         api_gateway_client: Option<ApiGatewayManagementClient>,
@@ -41,6 +44,7 @@ impl AppState {
         Arc::new(Self {
             cognito_client,
             dynamo_client,
+            lambda_client,
             s3_client,
             ses_client,
             api_gateway_client,

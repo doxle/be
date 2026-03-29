@@ -1,26 +1,29 @@
-use doxle_atoms::blocks::model::{Block, CreateBlockPayload, UpdateBlockPayload};
+use doxle_atoms::blocks::model::{Block, BlockType, CreateBlockPayload, UpdateBlockPayload};
 use aws_sdk_dynamodb::Client as DynamoClient;
 use aws_sdk_s3::Client as S3Client;
 use lambda_http::{http::StatusCode, Body, Error, Response};
 use aws_sdk_dynamodb::types::{AttributeValue, WriteRequest, DeleteRequest};
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
+use futures::stream::{self, StreamExt};
 use crate::types::AnnotationBlock;
-use crate::labels::fetch_labels_for_block;
+
+use crate::labels::{create_default_labels_for_block,fetch_labels_for_block};
 
 /// Create a new block:
-/// PK = "BLOCK"
+/// PK = "PROJECT#{project_id}"
 /// SK = "BLOCK#{block_id}"
 pub async fn create_block(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     body: &[u8],
 ) -> Result<Response<Body>, Error> {
     let req: CreateBlockPayload = serde_json::from_slice(body)?;
 
     let block_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let pk = "BLOCK".to_string();
+    let pk = format!("PROJECT#{}", project_id);
     let sk = format!("BLOCK#{}", block_id);
     
     let mut builder = client
@@ -29,13 +32,15 @@ pub async fn create_block(
         .item("PK", AttributeValue::S(pk.clone()))
         .item("SK", AttributeValue::S(sk.clone()))
         .item("block_name", AttributeValue::S(req.block_name.clone()))
-        .item("block_type", AttributeValue::S(req.block_type.clone()))
+        .item("block_type", AttributeValue::S(req.block_type.as_str().to_string()))
         .item("block_state", AttributeValue::S("draft".to_string()))
         .item("block_locked", AttributeValue::Bool(false))
         .item("image_count", AttributeValue::N(0.to_string()))
         .item("approved_image_count", AttributeValue::N(0.to_string()))
         .item("annotation_count", AttributeValue::N(0.to_string()))
-        .item("block_created_at", AttributeValue::S(now.clone()));
+        .item("block_created_at", AttributeValue::S(now.clone()))
+        .item("block_updated_at", AttributeValue::S(now.clone()))
+        .item("project_id", AttributeValue::S(project_id.to_string()));
 
     if let Some(comp) = &req.block_company {
         builder = builder.item("block_company", AttributeValue::S(comp.clone()));
@@ -43,8 +48,13 @@ pub async fn create_block(
         
     builder.send().await?;
 
+    
+    // Create default labels for this block type
+    let labels = create_default_labels_for_block(client, table_name, &block_id, req.block_type.as_str()).await?;
+
     let block = Block {
         block_id,
+        project_id: project_id.to_string(),
         block_name: req.block_name,
         block_type: req.block_type,
         block_company: req.block_company,
@@ -53,13 +63,21 @@ pub async fn create_block(
         image_count: 0,
         approved_image_count: 0,
         annotation_count: 0,
-        block_created_at: now,
+        block_created_at: now.clone(),
+        block_updated_at: now,
     };
+
+    
+    // Fetch the labels we just created
+    // let labels = fetch_labels_for_block(client, table_name, &block.block_id).await?;
+    // println!("📦 Created block {} with {} labels", block.block_id, labels.len());
 
     let response = AnnotationBlock {
         block,
-        labels: Vec::new(),
+        labels,
     };
+    println!("📤 Returning: {}", serde_json::to_string(&response).unwrap_or_default());
+
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -73,9 +91,10 @@ pub async fn create_block(
 pub async fn get_block(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
 ) -> Result<Response<Body>, Error> {
-    let pk = "BLOCK".to_string();
+    let pk = format!("PROJECT#{}", project_id);
     let sk = format!("BLOCK#{}", block_id);
 
     let result = client
@@ -87,20 +106,26 @@ pub async fn get_block(
         .await?;
 
     if let Some(item) = result.item() {
-        let labels = fetch_labels_for_block(client, table_name, block_id).await?;
+        let block_type = item
+            .get("block_type")
+            .and_then(|v| v.as_s().ok())
+            .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok())
+            .unwrap_or(BlockType::Annotation);
+        let labels = if block_type == BlockType::Annotation {
+            fetch_labels_for_block(client, table_name, block_id).await?
+        } else {
+            vec![]
+        };
         
         let block = Block {
             block_id: block_id.to_string(),
+            project_id: project_id.to_string(),
             block_name: item
                 .get("block_name")
                 .and_then(|v| v.as_s().ok())
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
-            block_type: item
-                .get("block_type")
-                .and_then(|v| v.as_s().ok())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "annotation".to_string()),
+            block_type: block_type.clone(),
             block_company: item
                 .get("block_company")
                 .and_then(|v| v.as_s().ok())
@@ -135,6 +160,11 @@ pub async fn get_block(
                 .and_then(|v| v.as_s().ok())
                 .map(|s| s.to_string())
                 .unwrap_or_default(),
+            block_updated_at: item
+                .get("block_updated_at")
+                .and_then(|v| v.as_s().ok())
+                .map(|s| s.to_string())
+                .unwrap_or_default(),
         };
 
         let response = AnnotationBlock { block, labels };
@@ -163,8 +193,9 @@ pub async fn get_block(
 pub async fn list_blocks(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
 ) -> Result<Response<Body>, Error> {
-    let pk = "BLOCK".to_string();
+    let pk = format!("PROJECT#{}", project_id);
 
     let result = match client
         .query()
@@ -194,26 +225,32 @@ pub async fn list_blocks(
     for item in result.items() {
         if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
             if let Some(block_id) = sk.strip_prefix("BLOCK#") {
-                let labels = match fetch_labels_for_block(client, table_name, block_id).await {
-                    Ok(l) => l,
-                    Err(e) => {
-                        tracing::error!("Failed to load labels for block {}: {:?}", block_id, e);
-                        vec![]
+                let block_type = item
+                    .get("block_type")
+                    .and_then(|v| v.as_s().ok())
+                    .and_then(|s| serde_json::from_value(serde_json::Value::String(s.to_string())).ok())
+                    .unwrap_or(BlockType::Annotation);
+                let labels = if block_type == BlockType::Annotation {
+                    match fetch_labels_for_block(client, table_name, block_id).await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!("Failed to load labels for block {}: {:?}", block_id, e);
+                            vec![]
+                        }
                     }
+                } else {
+                    vec![]
                 };
                 
                 let block = Block {
                     block_id: block_id.to_string(),
+                    project_id: project_id.to_string(),
                     block_name: item
                         .get("block_name")
                         .and_then(|v| v.as_s().ok())
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
-                    block_type: item
-                        .get("block_type")
-                        .and_then(|v| v.as_s().ok())
-                        .map(|s| s.to_string())
-                        .unwrap_or_else(|| "annotation".to_string()),
+                    block_type: block_type.clone(),
                     block_company: item
                         .get("block_company")
                         .and_then(|v| v.as_s().ok())
@@ -248,6 +285,11 @@ pub async fn list_blocks(
                         .and_then(|v| v.as_s().ok())
                         .map(|s| s.to_string())
                         .unwrap_or_default(),
+                    block_updated_at: item
+                        .get("block_updated_at")
+                        .and_then(|v| v.as_s().ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_default(),
                 };
                 blocks.push(AnnotationBlock { block, labels });
             }
@@ -266,11 +308,12 @@ pub async fn list_blocks(
 pub async fn update_block(
     client: &DynamoClient,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
     body: &[u8],
 ) -> Result<Response<Body>, Error> {
     let req: UpdateBlockPayload = serde_json::from_slice(body)?;
-    let pk = "BLOCK".to_string();
+    let pk = format!("PROJECT#{}", project_id);
     let sk = format!("BLOCK#{}", block_id);
 
     let mut update_expr = vec![];
@@ -304,6 +347,14 @@ pub async fn update_block(
         );
     }
 
+    // Always update block_updated_at on any change
+    update_expr.push("#block_updated_at = :block_updated_at");
+    expr_names.insert("#block_updated_at".to_string(), "block_updated_at".to_string());
+    expr_values.insert(
+        ":block_updated_at".to_string(),
+        AttributeValue::S(chrono::Utc::now().to_rfc3339()),
+    );
+
     if !update_expr.is_empty() {
         let mut builder = client
             .update_item()
@@ -323,7 +374,7 @@ pub async fn update_block(
         builder.send().await?;
     }
 
-    get_block(client, table_name, block_id).await
+    get_block(client, table_name, project_id, block_id).await
 }
 
 /// Delete a block and associated records (images, annotations, links)
@@ -331,28 +382,31 @@ pub async fn delete_block(
     client: &DynamoClient,
     s3_client: &S3Client,
     table_name: &str,
+    project_id: &str,
     block_id: &str,
 ) -> Result<Response<Body>, Error> {
-   let block_pk = format!("BLOCK#{}", block_id);
-   let mut delete_keys:Vec<HashMap<String, AttributeValue>> = vec![]; //collection to delete
+    let block_pk = format!("BLOCK#{}", block_id);
 
-    // STEP 1: Delete tasks and their images
-    delete_tasks(&client, table_name, &block_pk, &mut delete_keys).await?;
+    // Run all discovery queries in parallel
+    let (tasks_result, labels_result, images_result) = tokio::join!(
+        delete_tasks(client, table_name, &block_pk),
+        delete_labels(client, table_name, &block_pk),
+        delete_block_images(client, table_name, &block_pk),
+    );
 
-    // STEP 2: Delete labels
-    delete_labels(&client, table_name, &block_pk, &mut delete_keys).await?;
+    let mut delete_keys = tasks_result?;
+    delete_keys.extend(labels_result?);
+    delete_keys.extend(images_result?);
 
-    // STEP 3: Delete block images and their annotations
-    delete_block_images(&client, table_name, &block_pk, &mut delete_keys).await?;
+    // Add the block record itself
+    delete_block_record(project_id, block_id, &mut delete_keys);
 
-    // STEP 4: Delete the block itself
-    delete_block_record(&block_pk, block_id, &mut delete_keys);
-
-    // STEP 5: Batch delete all records
-    batch_delete_items(&client, table_name, &delete_keys).await?;
-
-    // STEP 6: Delete S3 files
-    delete_s3_prefix(s3_client, block_id).await.ok();
+    // Batch delete all records + S3 cleanup in parallel
+    let (batch_res, _) = tokio::join!(
+        batch_delete_items(client, table_name, &delete_keys),
+        async { delete_s3_prefix(s3_client, block_id).await.ok() },
+    );
+    batch_res?;
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -368,8 +422,9 @@ async fn delete_tasks(
     client: &DynamoClient,
     table_name: &str,
     block_pk: &str,
-    delete_keys: &mut Vec<HashMap<String, AttributeValue>>,
-) -> Result<(), Error> {
+) -> Result<Vec<HashMap<String, AttributeValue>>, Error> {
+    let mut delete_keys = Vec::new();
+
     let tasks_result = client
         .query()
         .table_name(table_name)
@@ -384,17 +439,25 @@ async fn delete_tasks(
         if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
             if sk.starts_with("TASK#") {
                 task_pks.push(sk.to_string());
-                add_delete_key(delete_keys, block_pk, sk);
+                add_delete_key(&mut delete_keys, block_pk, sk);
             }
         }
     }
 
-    for task_pk in &task_pks {
-        delete_task_images(client, table_name, task_pk, delete_keys).await?;
-        add_delete_key(delete_keys, task_pk, task_pk);
+    // Query task images with bounded concurrency
+    let task_pks_clone = task_pks.clone();
+    let image_futures = task_pks_clone.into_iter().map(|task_pk| {
+        let c = client.clone();
+        let t = table_name.to_string();
+        async move { delete_task_images(&c, &t, &task_pk).await }
+    });
+    let image_results: Vec<_> = stream::iter(image_futures).buffer_unordered(24).collect().await;
+    for (i, result) in image_results.into_iter().enumerate() {
+        delete_keys.extend(result?);
+        add_delete_key(&mut delete_keys, &task_pks[i], &task_pks[i]);
     }
 
-    Ok(())
+    Ok(delete_keys)
 }
 
 /// Delete all images for a task
@@ -402,8 +465,9 @@ async fn delete_task_images(
     client: &DynamoClient,
     table_name: &str,
     task_pk: &str,
-    delete_keys: &mut Vec<HashMap<String, AttributeValue>>,
-) -> Result<(), Error> {
+) -> Result<Vec<HashMap<String, AttributeValue>>, Error> {
+    let mut delete_keys = Vec::new();
+
     let task_images_result = client
         .query()
         .table_name(table_name)
@@ -415,11 +479,11 @@ async fn delete_task_images(
 
     for item in task_images_result.items() {
         if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
-            add_delete_key(delete_keys, task_pk, sk);
+            add_delete_key(&mut delete_keys, task_pk, sk);
         }
     }
 
-    Ok(())
+    Ok(delete_keys)
 }
 
 /// Delete all labels for a block
@@ -427,8 +491,9 @@ async fn delete_labels(
     client: &DynamoClient,
     table_name: &str,
     block_pk: &str,
-    delete_keys: &mut Vec<HashMap<String, AttributeValue>>,
-) -> Result<(), Error> {
+) -> Result<Vec<HashMap<String, AttributeValue>>, Error> {
+    let mut delete_keys = Vec::new();
+
     let labels_result = client
         .query()
         .table_name(table_name)
@@ -440,11 +505,11 @@ async fn delete_labels(
 
     for item in labels_result.items() {
         if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
-            add_delete_key(delete_keys, block_pk, sk);
+            add_delete_key(&mut delete_keys, block_pk, sk);
         }
     }
 
-    Ok(())
+    Ok(delete_keys)
 }
 
 // Delete all images for a block and their annotations
@@ -452,8 +517,9 @@ async fn delete_block_images(
     client: &DynamoClient,
     table_name: &str,
     block_pk: &str,
-    delete_keys: &mut Vec<HashMap<String, AttributeValue>>,
-) -> Result<(), Error> {
+) -> Result<Vec<HashMap<String, AttributeValue>>, Error> {
+    let mut delete_keys = Vec::new();
+
     let images_result = client
         .query()
         .table_name(table_name)
@@ -468,64 +534,76 @@ async fn delete_block_images(
         if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
             if sk.starts_with("IMAGE#") {
                 image_pks.push(sk.to_string());
-                add_delete_key(delete_keys, block_pk, sk);
+                add_delete_key(&mut delete_keys, block_pk, sk);
             }
         }
     }
 
-    for image_pk in &image_pks {
-        delete_annotations(client, table_name, image_pk, delete_keys).await?;
-        add_delete_key(delete_keys, image_pk, image_pk);
+    // Query annotations with bounded concurrency
+    let image_pks_clone = image_pks.clone();
+    let ann_futures = image_pks_clone.into_iter().map(|image_pk| {
+        let c = client.clone();
+        let t = table_name.to_string();
+        async move { delete_annotations(&c, &t, &image_pk).await }
+    });
+    let ann_results: Vec<_> = stream::iter(ann_futures).buffer_unordered(24).collect().await;
+    for (i, result) in ann_results.into_iter().enumerate() {
+        delete_keys.extend(result?);
+        add_delete_key(&mut delete_keys, &image_pks[i], &image_pks[i]);
     }
 
-    Ok(())
+    Ok(delete_keys)
 }
 
 /// Delete all annotations for an image
 async fn delete_annotations(
-    client:&DynamoClient,
-    table_name:&str,
-    image_pk:&str,
-    delete_keys: &mut Vec<HashMap<String, AttributeValue>>,
-    )->Result<(),Error>{
+    client: &DynamoClient,
+    table_name: &str,
+    image_pk: &str,
+) -> Result<Vec<HashMap<String, AttributeValue>>, Error> {
+    let mut delete_keys = Vec::new();
+
     let annotations_result = client
-            .query()
-            .table_name(table_name)
-            .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
-            .expression_attribute_values(":pk", AttributeValue::S(image_pk.to_string()))
-            .expression_attribute_values(":sk_prefix", AttributeValue::S("ANNOTATION#".to_string()))
-            .send()
-            .await?;
+        .query()
+        .table_name(table_name)
+        .key_condition_expression("PK = :pk AND begins_with(SK, :sk_prefix)")
+        .expression_attribute_values(":pk", AttributeValue::S(image_pk.to_string()))
+        .expression_attribute_values(":sk_prefix", AttributeValue::S("ANNOTATION#".to_string()))
+        .send()
+        .await?;
 
     for item in annotations_result.items() {
         if let Some(sk) = item.get("SK").and_then(|v| v.as_s().ok()) {
-            add_delete_key(delete_keys, image_pk, sk);
+            add_delete_key(&mut delete_keys, image_pk, sk);
         }
     }
 
-    Ok(())
+    Ok(delete_keys)
 }
 
 /// Add the block self-record to delete keys
 fn delete_block_record(
-    _block_pk: &str,
+    project_id: &str,
     block_id: &str,
     delete_keys: &mut Vec<HashMap<String, AttributeValue>>,
 ) {
     let mut key = HashMap::new();
-    key.insert("PK".to_string(), AttributeValue::S("BLOCK".to_string()));
+    key.insert("PK".to_string(), AttributeValue::S(format!("PROJECT#{}", project_id)));
     key.insert("SK".to_string(), AttributeValue::S(format!("BLOCK#{}", block_id)));
     delete_keys.push(key);
 }
 
-/// Batch delete items from DynamoDB (25 items per request with retry logic)
+/// Batch delete items from DynamoDB — 25 per request, 10 concurrent batches
 async fn batch_delete_items(
     client: &DynamoClient,
     table_name: &str,
     delete_keys: &[HashMap<String, AttributeValue>],
 ) -> Result<(), Error> {
-    for chunk in delete_keys.chunks(25) {
-        let write_reqs: Vec<_> = chunk
+    let chunks: Vec<Vec<_>> = delete_keys.chunks(25).map(|c| c.to_vec()).collect();
+    let batch_futures = chunks.into_iter().map(|chunk| {
+        let c = client.clone();
+        let t = table_name.to_string();
+        let reqs: Vec<_> = chunk
             .iter()
             .map(|k| {
                 WriteRequest::builder()
@@ -539,27 +617,35 @@ async fn batch_delete_items(
             })
             .collect();
 
-        let mut unprocessed = Some(write_reqs);
-        let mut attempts = 0;
-        while let Some(reqs) = unprocessed {
-            attempts += 1;
-            let result = client
-                .batch_write_item()
-                .request_items(table_name, reqs)
-                .send()
-                .await?;
+        async move {
+            let mut unprocessed = Some(reqs);
+            let mut attempts: u64 = 0;
+            while let Some(batch) = unprocessed {
+                attempts += 1;
+                let result = c
+                    .batch_write_item()
+                    .request_items(&t, batch)
+                    .send()
+                    .await?;
 
-            unprocessed = result
-                .unprocessed_items()
-                .and_then(|m| m.get(table_name))
-                .map(|v| v.clone());
+                unprocessed = result
+                    .unprocessed_items()
+                    .and_then(|m| m.get(t.as_str()))
+                    .map(|v| v.clone());
 
-            if unprocessed.is_some() && attempts < 5 {
-                sleep(Duration::from_millis(100 * attempts)).await;
-            } else {
-                break;
+                if unprocessed.is_some() && attempts < 5 {
+                    sleep(Duration::from_millis(100 * attempts)).await;
+                } else {
+                    break;
+                }
             }
+            Ok::<(), Error>(())
         }
+    });
+
+    let mut batch_stream = stream::iter(batch_futures).buffer_unordered(10);
+    while let Some(result) = batch_stream.next().await {
+        result?;
     }
 
     Ok(())
@@ -583,15 +669,31 @@ async fn delete_s3_prefix(
     block_id: &str,
 ) -> Result<(), Error> {
     let bucket_name = std::env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "doxle-app".to_string());
-    // Match the upload prefix structure: annotations/blocks/{block_id}/
-    let prefix = format!("annotations/blocks/{}/", block_id);
+    // Delete both annotation images and any leftover import zips
+    let prefixes = vec![
+        format!("annotations/blocks/{}/", block_id),
+        format!("files/blocks/{}/", block_id),
+        format!("imports/{}/", block_id),
+    ];
+    for prefix in &prefixes {
+    delete_s3_objects_with_prefix(s3_client, &bucket_name, prefix).await?;
+    }
+    Ok(())
+}
+
+/// Delete all S3 objects under a given prefix
+async fn delete_s3_objects_with_prefix(
+    s3_client: &S3Client,
+    bucket_name: &str,
+    prefix: &str,
+) -> Result<(), Error> {
 
     let mut continuation: Option<String> = None;
     loop {
         let mut req = s3_client
             .list_objects_v2()
-            .bucket(&bucket_name)
-            .prefix(&prefix);
+            .bucket(bucket_name)
+            .prefix(prefix);
         if let Some(token) = continuation.as_ref() {
             req = req.continuation_token(token);
         }
@@ -627,7 +729,7 @@ async fn delete_s3_prefix(
 
         let _ = s3_client
             .delete_objects()
-            .bucket(&bucket_name)
+            .bucket(bucket_name)
             .delete(delete_payload)
             .send()
             .await;

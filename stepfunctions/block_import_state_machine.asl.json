@@ -1,0 +1,294 @@
+{
+  "Comment": "Doxle block import orchestration",
+  "StartAt": "InitJob",
+  "States": {
+    "InitJob": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "init",
+          "import_job_id.$": "$.import_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "import_id.$": "$.import_id",
+          "s3_key.$": "$.s3_key"
+        }
+      },
+      "ResultPath": "$.init",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "ParseImport"
+    },
+    "ParseImport": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "parse",
+          "import_job_id.$": "$.import_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "import_id.$": "$.import_id",
+          "s3_key.$": "$.s3_key"
+        }
+      },
+      "ResultSelector": {
+        "labels_total.$": "$.Payload.labels_total",
+        "tasks_total.$": "$.Payload.tasks_total",
+        "images_total.$": "$.Payload.images_total",
+        "annotations_total.$": "$.Payload.annotations_total"
+      },
+      "ResultPath": "$.parse",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "InitLabelsLoop"
+    },
+    "InitLabelsLoop": {
+      "Type": "Pass",
+      "Result": {
+        "offset": 0
+      },
+      "ResultPath": "$.labels_state",
+      "Next": "ProcessLabelsBatch"
+    },
+    "ProcessLabelsBatch": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "process_batch",
+          "phase": "labels",
+          "offset.$": "$.labels_state.offset",
+          "limit": 50,
+          "import_job_id.$": "$.import_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "import_id.$": "$.import_id",
+          "s3_key.$": "$.s3_key"
+        }
+      },
+      "ResultSelector": {
+        "done.$": "$.Payload.done",
+        "next_offset.$": "$.Payload.next_offset"
+      },
+      "ResultPath": "$.labels_batch",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "LabelsDone"
+    },
+    "LabelsDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.labels_batch.done",
+          "BooleanEquals": true,
+          "Next": "InitTasksLoop"
+        }
+      ],
+      "Default": "UpdateLabelsOffset"
+    },
+    "UpdateLabelsOffset": {
+      "Type": "Pass",
+      "Parameters": {
+        "offset.$": "$.labels_batch.next_offset"
+      },
+      "ResultPath": "$.labels_state",
+      "Next": "ProcessLabelsBatch"
+    },
+    "InitTasksLoop": {
+      "Type": "Pass",
+      "Result": {
+        "offset": 0
+      },
+      "ResultPath": "$.tasks_state",
+      "Next": "ProcessTasksBatch"
+    },
+    "ProcessTasksBatch": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "process_batch",
+          "phase": "tasks",
+          "offset.$": "$.tasks_state.offset",
+          "limit": 50,
+          "import_job_id.$": "$.import_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "import_id.$": "$.import_id",
+          "s3_key.$": "$.s3_key"
+        }
+      },
+      "ResultSelector": {
+        "done.$": "$.Payload.done",
+        "next_offset.$": "$.Payload.next_offset"
+      },
+      "ResultPath": "$.tasks_batch",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "TasksDone"
+    },
+    "TasksDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.tasks_batch.done",
+          "BooleanEquals": true,
+          "Next": "InitImagesLoop"
+        }
+      ],
+      "Default": "UpdateTasksOffset"
+    },
+    "UpdateTasksOffset": {
+      "Type": "Pass",
+      "Parameters": {
+        "offset.$": "$.tasks_batch.next_offset"
+      },
+      "ResultPath": "$.tasks_state",
+      "Next": "ProcessTasksBatch"
+    },
+    "InitImagesLoop": {
+      "Type": "Pass",
+      "Result": {
+        "offset": 0
+      },
+      "ResultPath": "$.images_state",
+      "Next": "ProcessImagesBatch"
+    },
+    "ProcessImagesBatch": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "process_batch",
+          "phase": "images",
+          "offset.$": "$.images_state.offset",
+          "limit": 200,
+          "import_job_id.$": "$.import_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "import_id.$": "$.import_id",
+          "s3_key.$": "$.s3_key"
+        }
+      },
+      "ResultSelector": {
+        "done.$": "$.Payload.done",
+        "next_offset.$": "$.Payload.next_offset"
+      },
+      "ResultPath": "$.images_batch",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Next": "ImagesDone"
+    },
+    "ImagesDone": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.images_batch.done",
+          "BooleanEquals": true,
+          "Next": "CleanupImport"
+        }
+      ],
+      "Default": "UpdateImagesOffset"
+    },
+    "UpdateImagesOffset": {
+      "Type": "Pass",
+      "Parameters": {
+        "offset.$": "$.images_batch.next_offset"
+      },
+      "ResultPath": "$.images_state",
+      "Next": "ProcessImagesBatch"
+    },
+    "CleanupImport": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${WORKER_FUNCTION_ARN}",
+        "Payload": {
+          "action": "cleanup",
+          "import_job_id.$": "$.import_job_id",
+          "project_id.$": "$.project_id",
+          "block_id.$": "$.block_id",
+          "import_id.$": "$.import_id",
+          "s3_key.$": "$.s3_key"
+        }
+      },
+      "ResultPath": "$.cleanup",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "Lambda.ServiceException",
+            "Lambda.AWSLambdaException",
+            "Lambda.SdkClientException",
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 2,
+          "BackoffRate": 2.0
+        }
+      ],
+      "End": true
+    }
+  }
+}

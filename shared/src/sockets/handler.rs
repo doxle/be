@@ -177,20 +177,20 @@ async fn handle_message(
 
         // Block actions
         "create_block" => {
-            // let _project_id = message
-            //     .data
-            //     .get("project_id")
-            //     .and_then(|v| v.as_str())
-            //     .ok_or("Missing project_id")?;
+            let project_id = message
+                .data
+                .get("project_id")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing project_id")?;
             let body_bytes = serde_json::to_vec(&message.data)?;
-            blocks::create_block(&state.dynamo_client, table_name, &body_bytes).await
+            blocks::create_block(&state.dynamo_client, table_name, project_id, &body_bytes).await
         }
         "update_block" => {
-            // let project_id = message
-            //     .data
-            //     .get("project_id")
-            //     .and_then(|v| v.as_str())
-            //     .ok_or("Missing project_id")?;
+            let project_id = message
+                .data
+                .get("project_id")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing project_id")?;
             let block_id = message
                 .data
                 .get("block_id")
@@ -200,17 +200,18 @@ async fn handle_message(
             blocks::update_block(
                 &state.dynamo_client,
                 table_name,
+                project_id,
                 block_id,
                 &body_bytes,
             )
             .await
         }
         "delete_block" => {
-            // let project_id = message
-            //     .data
-            //     .get("project_id")
-            //     .and_then(|v| v.as_str())
-            //     .ok_or("Missing project_id")?;
+            let project_id = message
+                .data
+                .get("project_id")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing project_id")?;
             let block_id = message
                 .data
                 .get("block_id")
@@ -220,7 +221,8 @@ async fn handle_message(
                 &state.dynamo_client,
                 &state.s3_client,
                 table_name,
-                block_id
+                project_id,
+                block_id,
             )
             .await
         }
@@ -272,6 +274,10 @@ async fn handle_message(
 
         // Annotation actions
         "create_annotation" => {
+            let project_id = message
+                .data
+                .get("project_id")
+                .and_then(|v| v.as_str());
             let block_id = message
                 .data
                 .get("block_id")
@@ -286,6 +292,7 @@ async fn handle_message(
             doxle_atoms::drawing::create_annotation(
                 &state.dynamo_client,
                 table_name,
+                project_id,
                 block_id,
                 image_id,
                 &user_id,
@@ -294,6 +301,11 @@ async fn handle_message(
             .await
         }
         "update_annotation" => {
+            let block_id = message
+                .data
+                .get("block_id")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing block_id")?;
             let image_id = message
                 .data
                 .get("image_id")
@@ -308,6 +320,7 @@ async fn handle_message(
             doxle_atoms::drawing::update_annotation(
                 &state.dynamo_client,
                 table_name,
+                block_id,
                 image_id,
                 annotation_id,
                 &body_bytes,
@@ -315,6 +328,10 @@ async fn handle_message(
             .await
         }
         "delete_annotation" => {
+            let project_id = message
+                .data
+                .get("project_id")
+                .and_then(|v| v.as_str());
             let block_id = message
                 .data
                 .get("block_id")
@@ -333,6 +350,7 @@ async fn handle_message(
             doxle_atoms::drawing::delete_annotation(
                 &state.dynamo_client,
                 table_name,
+                project_id,
                 block_id,
                 image_id,
                 annotation_id,

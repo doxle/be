@@ -4,3 +4,5 @@ pub mod users;
 // pub mod labels;
 pub mod drawing;
 pub mod blocks;
+pub mod comments;
+pub mod projects;
